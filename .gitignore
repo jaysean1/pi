@@ -1,0 +1,18 @@
+# Purpose: Keep generated Pi data and credentials out of Git.
+# Not for: Hiding source configuration or extension code.
+.DS_Store
+
+# Pi credentials, backups, and live state
+agent/auth.json
+agent/settings.json.bak.*
+agent/state/
+agent/sessions/
+cache/
+
+# Installed dependencies and local binaries
+**/node_modules/
+agent/bin/
+
+# Runtime noise
+*.log
+*.lock
