@@ -2,11 +2,11 @@
 //
 // For each tool it renders the 5-hour and 7-day rate-limit windows as a used
 // percentage plus a countdown to the next reset, e.g.
-//   Codex | 5h: 2% (15h) | 7d: 11% (6d) | Claude | 5h: 0% (1h40m) | 7d: 4% (4d11h)
+//   Codex | 5h: 2% (15h) | 7d: 11% (6d) · Claude | 5h: 0% (1h40m) | 7d: 4% (4d11h)
 //
 // Data sources (both local to this machine):
 //   Codex  - latest ~/.codex/sessions rollout file, last token_count.rate_limits
-//   Claude - Anthropic OAuth usage endpoint, token read from macOS Keychain
+//   Claude - Vibe Island cache first, then Anthropic OAuth endpoint as fallback
 //
 // Manual refresh: /usage
 
@@ -22,6 +22,10 @@ const REFRESH_MS = 60_000;
 const CODEX_TAIL_BYTES = 512 * 1024;
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
+const CLAUDE_CACHE_STALE_MS = 30 * 60 * 1000;
+const VIBE_ISLAND_CACHE_DIR = path.join(os.homedir(), ".vibe-island", "cache");
+const CLAUDE_USAGE_CACHE = path.join(VIBE_ISLAND_CACHE_DIR, "usage-persist-anthropic.json");
+const CLAUDE_RATE_LIMIT_CACHE = path.join(VIBE_ISLAND_CACHE_DIR, "rl.json");
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +39,9 @@ interface Window {
 interface Usage {
 	fiveHour?: Window;
 	sevenDay?: Window;
+	stale?: boolean;
+	source?: string;
+	updatedMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +156,82 @@ export function readCodexUsage(): Usage | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Claude: read OAuth token from the Keychain, query the usage endpoint
+// Claude: read local Vibe Island cache first, then query OAuth endpoint
 // ---------------------------------------------------------------------------
+
+function toEpochMs(raw: unknown): number {
+	if (typeof raw === "number" && Number.isFinite(raw)) {
+		return raw > 1_000_000_000_000 ? raw : raw * 1000;
+	}
+	if (typeof raw !== "string" || !raw.trim()) return NaN;
+	const numeric = Number(raw);
+	if (Number.isFinite(numeric)) return toEpochMs(numeric);
+	const parsed = Date.parse(raw);
+	return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function toClaudeWindow(raw: unknown): Window | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const r = raw as {
+		resets_at?: unknown;
+		used_percentage?: unknown;
+		utilization?: unknown;
+	};
+	const pct = typeof r.used_percentage === "number" ? r.used_percentage : r.utilization;
+	if (typeof pct !== "number") return undefined;
+	return { pct, resetMs: toEpochMs(r.resets_at) };
+}
+
+function readClaudeUsageCache(filePath: string, source: string, requireAnthropicProvider: boolean): Usage | undefined {
+	let text: string;
+	let mtimeMs = NaN;
+	try {
+		const stat = fs.statSync(filePath);
+		mtimeMs = stat.mtimeMs;
+		text = fs.readFileSync(filePath, "utf8");
+	} catch {
+		return undefined;
+	}
+
+	let data: {
+		fetched_at?: unknown;
+		five_hour?: unknown;
+		provider?: unknown;
+		seven_day?: unknown;
+	};
+	try {
+		data = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (requireAnthropicProvider && data.provider !== "anthropic") return undefined;
+
+	const fiveHour = toClaudeWindow(data.five_hour);
+	const sevenDay = toClaudeWindow(data.seven_day);
+	if (!fiveHour && !sevenDay) return undefined;
+
+	const fetchedMs = toEpochMs(data.fetched_at);
+	const updatedMs = Number.isFinite(fetchedMs) ? fetchedMs : mtimeMs;
+	const stale = Number.isFinite(updatedMs)
+		? Date.now() - updatedMs > CLAUDE_CACHE_STALE_MS
+		: true;
+	return { fiveHour, sevenDay, source, stale, updatedMs };
+}
+
+export function readClaudeCachedUsage(): Usage | undefined {
+	const persisted = readClaudeUsageCache(
+		CLAUDE_USAGE_CACHE,
+		"usage-persist-anthropic",
+		true,
+	);
+	if (persisted && !persisted.stale) return persisted;
+
+	const bridge = readClaudeUsageCache(CLAUDE_RATE_LIMIT_CACHE, "rl", false);
+	if (!persisted) return bridge;
+	if (!bridge) return persisted;
+	if (!bridge.stale) return bridge;
+	return (bridge.updatedMs ?? 0) > (persisted.updatedMs ?? 0) ? bridge : persisted;
+}
 
 async function readClaudeToken(): Promise<string | undefined> {
 	try {
@@ -186,14 +267,10 @@ export async function fetchClaudeUsage(): Promise<Usage | undefined> {
 			five_hour?: { utilization?: number; resets_at?: string };
 			seven_day?: { utilization?: number; resets_at?: string };
 		};
-		const conv = (w?: { utilization?: number; resets_at?: string }): Window | undefined => {
-			if (!w || typeof w.utilization !== "number") return undefined;
-			return { pct: w.utilization, resetMs: w.resets_at ? Date.parse(w.resets_at) : NaN };
-		};
-		const fiveHour = conv(data.five_hour);
-		const sevenDay = conv(data.seven_day);
+		const fiveHour = toClaudeWindow(data.five_hour);
+		const sevenDay = toClaudeWindow(data.seven_day);
 		if (!fiveHour && !sevenDay) return undefined;
-		return { fiveHour, sevenDay };
+		return { fiveHour, sevenDay, source: "oauth", stale: false, updatedMs: Date.now() };
 	} catch {
 		return undefined;
 	} finally {
@@ -227,6 +304,10 @@ function paintSeparator(theme: Theme): string {
 	return theme.fg("dim", " | ");
 }
 
+function paintToolSeparator(theme: Theme): string {
+	return theme.fg("dim", " · ");
+}
+
 function paintWindow(theme: Theme, label: string, win: Window): string {
 	const dim = (s: string) => theme.fg("dim", s);
 	return `${dim(`${label}:`)} ${paintPercent(theme, win.pct)} ${dim(`(${formatReset(win.resetMs)})`)}`;
@@ -234,7 +315,8 @@ function paintWindow(theme: Theme, label: string, win: Window): string {
 
 function paintTool(theme: Theme, name: string, usage: Usage | undefined): string {
 	const dim = (s: string) => theme.fg("dim", s);
-	const head = theme.bold(theme.fg("accent", name));
+	const stale = usage?.stale ? ` ${dim("(stale)")}` : "";
+	const head = `${theme.bold(theme.fg("accent", name))}${stale}`;
 	if (!usage || (!usage.fiveHour && !usage.sevenDay)) {
 		return [head, dim("—")].join(paintSeparator(theme));
 	}
@@ -267,15 +349,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (codex) lastCodex = codex;
 
-			const claude = await fetchClaudeUsage();
+			let claude = readClaudeCachedUsage();
+			if (!claude || claude.stale) {
+				const liveClaude = await fetchClaudeUsage();
+				if (liveClaude) claude = liveClaude;
+			}
 			if (claude) lastClaude = claude;
 
 			const theme = ctx.ui.theme;
-			const line = [
-				paintTool(theme, "Codex", lastCodex),
-				paintTool(theme, "Claude", lastClaude),
-			].join(paintSeparator(theme));
-			ctx.ui.setStatus(STATUS_KEY, line);
+				const line = [
+					paintTool(theme, "Codex", lastCodex),
+					paintTool(theme, "Claude", lastClaude),
+				].join(paintToolSeparator(theme));
+				ctx.ui.setStatus(STATUS_KEY, line);
 		} catch {
 			// never let the statusline crash the session
 		} finally {

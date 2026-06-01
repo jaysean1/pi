@@ -1,25 +1,33 @@
 // Standalone smoke test for the data path. Run with: bun verify.ts
-import { fetchClaudeUsage, formatReset, latestCodexRollout, readCodexUsage } from "./index.ts";
+import {
+	fetchClaudeUsage,
+	formatReset,
+	latestCodexRollout,
+	readClaudeCachedUsage,
+	readCodexUsage,
+} from "./index.ts";
 
 function pct(p: number | undefined) {
 	return p === undefined ? "—" : `${Math.round(p)}%`;
+}
+
+function describeUsage(
+	usage: ReturnType<typeof readCodexUsage>,
+): string {
+	if (!usage) return "(no data)";
+	const source = usage.source ? ` source=${usage.source}` : "";
+	const stale = usage.stale ? " stale=true" : "";
+	return `5h: ${pct(usage.fiveHour?.pct)} (${formatReset(usage.fiveHour?.resetMs ?? NaN)}) | 7d: ${pct(usage.sevenDay?.pct)} (${formatReset(usage.sevenDay?.resetMs ?? NaN)})${source}${stale}`;
 }
 
 const rollout = latestCodexRollout();
 console.log("codex rollout file:", rollout ?? "(none found)");
 
 const codex = readCodexUsage();
-console.log(
-	"codex usage:",
-	codex
-		? `5h: ${pct(codex.fiveHour?.pct)} (${formatReset(codex.fiveHour?.resetMs ?? NaN)}) | 7d: ${pct(codex.sevenDay?.pct)} (${formatReset(codex.sevenDay?.resetMs ?? NaN)})`
-		: "(no data)",
-);
+console.log("codex usage:", describeUsage(codex));
+
+const cachedClaude = readClaudeCachedUsage();
+console.log("claude cached usage:", describeUsage(cachedClaude));
 
 const claude = await fetchClaudeUsage();
-console.log(
-	"claude usage:",
-	claude
-		? `5h: ${pct(claude.fiveHour?.pct)} (${formatReset(claude.fiveHour?.resetMs ?? NaN)}) | 7d: ${pct(claude.sevenDay?.pct)} (${formatReset(claude.sevenDay?.resetMs ?? NaN)})`
-		: "(no data)",
-);
+console.log("claude oauth usage:", describeUsage(claude));
