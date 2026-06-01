@@ -2,21 +2,21 @@
 // The wordmark plays a rainbow reveal that freezes red; below it, recent session progress is listed.
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-// --- Wordmark font (5 rows, '#' = on). Edit WORD to change the text. ---
+// --- Wordmark font (7 rows, '#' = on). Bold 2px strokes. Edit WORD to change the text. ---
 const GLYPHS: Record<string, string[]> = {
-	J: ["..###", "...#.", "...#.", "#..#.", ".##.."],
-	A: [".###.", "#...#", "#####", "#...#", "#...#"],
-	Y: ["#...#", ".#.#.", "..#..", "..#..", "..#.."],
-	S: [".####", "#....", ".###.", "....#", "####."],
-	E: ["#####", "#....", "###..", "#....", "#####"],
-	N: ["#...#", "##..#", "#.#.#", "#..##", "#...#"],
+	J: ["######", "######", "....##", "....##", "....##", "##..##", ".####."],
+	A: [".####.", "######", "##..##", "##..##", "######", "##..##", "##..##"],
+	Y: ["##..##", "##..##", ".####.", "..##..", "..##..", "..##..", "..##.."],
+	S: [".#####", "######", "##....", ".####.", "....##", "######", "#####."],
+	E: ["######", "######", "##....", "#####.", "##....", "######", "######"],
+	N: ["##...##", "###..##", "####.##", "##.####", "##..###", "##...##", "##...##"],
 };
 const WORD = "JAYSEAN";
-const GLYPH_H = 5;
+const GLYPH_H = 7;
 const LETTER_GAP = 2; // columns between letters (room for the 3D extrude)
 
 type RGB = [number, number, number];
@@ -52,6 +52,7 @@ const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and su
 const MAX_ITEMS = 5; // recent sessions to list
 const HEAD_BYTES = 200_000; // bounded read from the top of a session file
 const TAIL_BYTES = 200_000; // bounded read from the bottom of a session file
+const OVERFLOW_MARKER = "...";
 
 const RESET = "\x1b[0m";
 
@@ -98,35 +99,8 @@ function hslToRgb(h: number, s: number, l: number): RGB {
 	return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
-// --- East-Asian-aware display width (so Chinese topics stay aligned) ---
-function charWidth(cp: number): number {
-	if (
-		(cp >= 0x1100 && cp <= 0x115f) ||
-		(cp >= 0x2e80 && cp <= 0xa4cf) ||
-		(cp >= 0xac00 && cp <= 0xd7a3) ||
-		(cp >= 0xf900 && cp <= 0xfaff) ||
-		(cp >= 0xfe30 && cp <= 0xfe4f) ||
-		(cp >= 0xff00 && cp <= 0xff60) ||
-		(cp >= 0xffe0 && cp <= 0xffe6)
-	)
-		return 2;
-	return 1;
-}
-function dispWidth(s: string): number {
-	let w = 0;
-	for (const ch of s) w += charWidth(ch.codePointAt(0)!);
-	return w;
-}
 function truncWidth(s: string, max: number): string {
-	let w = 0;
-	let out = "";
-	for (const ch of s) {
-		const cw = charWidth(ch.codePointAt(0)!);
-		if (w + cw > max) return `${out}…`;
-		w += cw;
-		out += ch;
-	}
-	return out;
+	return truncateToWidth(s, max, OVERFLOW_MARKER);
 }
 
 // --- Session-record helpers ---
@@ -160,7 +134,7 @@ function isMeaningfulUser(text: string): boolean {
 	if (!t) return false;
 	if (/^\/?(resume|reload|quit|new|clear|exit|sessions|intro|tree|fork|clone)(\s|$)/i.test(t)) return false;
 	if (/^(hi|hello|hey|thanks|thank you|ok|你好|嗨|谢谢|好的|可以|嗯|是的|继续)$/i.test(t)) return false;
-	return dispWidth(t) >= 4;
+	return visibleWidth(t) >= 4;
 }
 
 function extractText(content: unknown): string {
@@ -255,14 +229,16 @@ function buildArt() {
 	}
 	const cols = rows[0]!.length;
 	const h = GLYPH_H + 1; // extra row for the bottom extrude
-	const w = cols + 1; // extra col for the right extrude
-	// 0 = empty, 1 = shadow (extrude), 2 = face
+	const w = cols + 1; // extra col on the LEFT for the extrude
+	// 0 = empty, 1 = shadow (extrude), 2 = face.
+	// The 3D extrude is offset down + left: the face sits shifted one column right
+	// (c + 1) and the shadow drops down one row at the original column (c).
 	const type: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
 	for (let r = 0; r < GLYPH_H; r++)
 		for (let c = 0; c < cols; c++)
-			if (rows[r]![c] === "#" && type[r + 1]![c + 1] === 0) type[r + 1]![c + 1] = 1;
+			if (rows[r]![c] === "#" && type[r + 1]![c] === 0) type[r + 1]![c] = 1;
 	for (let r = 0; r < GLYPH_H; r++)
-		for (let c = 0; c < cols; c++) if (rows[r]![c] === "#") type[r]![c] = 2;
+		for (let c = 0; c < cols; c++) if (rows[r]![c] === "#") type[r]![c + 1] = 2;
 
 	let dMin = Infinity;
 	let dMax = -Infinity;
@@ -447,15 +423,15 @@ class IntroHeader implements Component {
 	/** Lines for the recent-work summary, aligned to the fixed header inset. */
 	private summaryLines(width: number): string[] {
 		const pad = this.leftPad(width);
-		const padW = dispWidth(pad);
-		const inner = Math.max(1, Math.min(width - padW, 88));
+		const padW = visibleWidth(pad);
+		const inner = Math.max(1, width - padW);
 		const bullet = "  • ";
-		const bulletW = dispWidth(bullet);
+		const bulletW = visibleWidth(bullet);
 		const out: string[] = [""];
 
 		if (this.focus) {
 			const prefix = "▸ now  ";
-			const text = truncWidth(this.focus, Math.max(8, inner - dispWidth(prefix)));
+			const text = truncWidth(this.focus, inner - visibleWidth(prefix));
 			out.push(pad + this.emit(FOCUS_RGB) + prefix + text + RESET);
 		}
 
@@ -473,10 +449,10 @@ class IntroHeader implements Component {
 		for (const item of this.items) {
 			const rt = item.time;
 			// Pad every topic to the same width so the time column lines up.
-			const avail = Math.max(8, inner - bulletW - rt.length - 1);
+			const avail = Math.max(0, inner - bulletW - visibleWidth(rt) - 1);
 			const mid = item.action ? `${item.topic}  →  ${item.action}` : item.topic;
 			const midT = truncWidth(mid, avail);
-			const padN = Math.max(1, avail - dispWidth(midT) + 1);
+			const padN = Math.max(1, avail - visibleWidth(midT) + 1);
 			out.push(
 				pad +
 					this.emit(BULLET_RGB) +
@@ -491,14 +467,14 @@ class IntroHeader implements Component {
 					RESET,
 			);
 		}
-		return out;
+		return out.map((line) => truncateToWidth(line, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET));
 	}
 
 	render(width: number): string[] {
 		// Narrow-terminal fallback: simple inset wordmark in the freeze colour.
 		if (width < ART.w + HEADER_INDENT) {
 			const pad = this.leftPad(width);
-			const plain = WORD.toLowerCase().slice(0, Math.max(0, width - dispWidth(pad)));
+			const plain = truncateToWidth(WORD.toLowerCase(), Math.max(0, width - visibleWidth(pad)), "");
 			return ["", pad + this.emit(RED_END) + plain + RESET, ""];
 		}
 

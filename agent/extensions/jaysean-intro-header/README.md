@@ -3,7 +3,8 @@
 An animated 3D ASCII wordmark shown at the top of the Pi UI on startup, with a Claude Code-style two-space left inset.
 
 On `session_start` it sets a custom header via `ctx.ui.setHeader(...)`. The header
-draws an extruded "JAYSEAN" wordmark and plays a one-shot intro in three phases:
+draws a **bold** "JAYSEAN" wordmark with a **down-left** 3D extrude and plays a
+one-shot intro in three phases:
 
 1. **Reveal** — a diagonal light sweep wipes in a flowing, ultrathink-style
    rainbow shimmer (hue rotates over time, across columns and rows).
@@ -52,7 +53,8 @@ This folder lives in `~/.pi/agent/extensions/`, so Pi auto-discovers it. No
 Open `index.ts` and edit the constants near the top:
 
 - `WORD` — the text to render. Add any new letters you need to `GLYPHS`
-  (each glyph is 5 rows of `#`/`.`, 5 columns wide).
+  (each glyph is 7 rows of `#`/`.` with bold ~2px strokes; rows within a glyph
+  must all be the same width). The 3D extrude is offset **down + left**.
 - `RED_START` / `RED_END` — the frozen red gradient (RGB). `HIGHLIGHT` is the
   white sweep crest; `SUBTITLE_RGB` tints the tagline.
 - `HUE_SPREAD` / `ROW_HUE` / `CYCLE_SPEED` / `RAINBOW_SAT` / `RAINBOW_LIGHT` —
