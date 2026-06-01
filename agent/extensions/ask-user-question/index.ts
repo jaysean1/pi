@@ -5,7 +5,16 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	Editor,
+	type EditorTheme,
+	Key,
+	matchesKey,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 
 const TOOL_NAME = "ask_user_question";
@@ -15,6 +24,14 @@ const MAX_OPTIONS = 5;
 const MAX_QUESTIONS = 4;
 const MAX_PREVIEW_LINES = 12;
 const VIEWPORT_PADDING_LINES = 1;
+const PREVIEW_MIN_WIDTH = 100;
+const PREVIEW_COLUMN_GAP = 4;
+const MIN_LEFT_COLUMN_WIDTH = 48;
+const MIN_PREVIEW_COLUMN_WIDTH = 45;
+const MAX_LEFT_COLUMN_RATIO = 0.5;
+const PREVIEW_BORDER_HORIZONTAL_OVERHEAD = 2;
+const PREVIEW_INNER_PADDING_HORIZONTAL = 1;
+const PREVIEW_BOX_MIN_CONTENT_WIDTH = 40;
 
 const RESERVED_LABELS = new Set([
 	"other",
@@ -542,27 +559,175 @@ async function askWithStructuredDialog(ctx: ExtensionContext, questions: Normali
 				return [...clippedTop, ...fitMiddleLines(bodyLines, bodyBudget, width), ...bottomLines];
 			}
 
-			function addPreview(lines: string[], question: NormalisedQuestion, rows: Row[], width: number): void {
+			function previewForFocusedRow(question: NormalisedQuestion, rows: Row[]): string | undefined {
 				const row = rows[rowIndex];
 				if (!row || row.kind !== "option") return;
-				const preview = question.options[row.optionIndex].preview;
-				if (!preview) return;
+				return question.options[row.optionIndex]?.preview;
+			}
 
-				lines.push("");
-				lines.push(truncateToWidth(theme.fg("muted", " Preview"), width));
-				let printed = 0;
+			function previewBoxWidth(contentLines: string[], maxWidth: number): number {
+				const maxContentWidth = Math.max(
+					1,
+					maxWidth - PREVIEW_BORDER_HORIZONTAL_OVERHEAD - 2 * PREVIEW_INNER_PADDING_HORIZONTAL,
+				);
+				let contentWidth = Math.min(PREVIEW_BOX_MIN_CONTENT_WIDTH, maxContentWidth);
+				for (const line of contentLines) {
+					contentWidth = Math.max(contentWidth, visibleWidth(line.replace(/\s+$/, "")));
+				}
+				return Math.min(maxWidth, contentWidth + PREVIEW_BORDER_HORIZONTAL_OVERHEAD + 2 * PREVIEW_INNER_PADDING_HORIZONTAL);
+			}
+
+			function renderBorderedPreviewBox(contentLines: string[], width: number, hidden: number): string[] {
+				const dashSpan = Math.max(1, width - PREVIEW_BORDER_HORIZONTAL_OVERHEAD);
+				const contentWidth = Math.max(1, dashSpan - 2 * PREVIEW_INNER_PADDING_HORIZONTAL);
+				const pad = " ".repeat(PREVIEW_INNER_PADDING_HORIZONTAL);
+				const lines = [theme.fg("accent", `┌${"─".repeat(dashSpan)}┐`)];
+
+				for (const line of contentLines) {
+					const padded = truncateToWidth(theme.fg("dim", line), contentWidth, "", true);
+					lines.push(`${theme.fg("accent", "│")}${pad}${padded}${pad}${theme.fg("accent", "│")}`);
+				}
+
+				if (hidden > 0) {
+					const indicator = ` ✂ ── ${hidden} lines hidden ── `;
+					const space = dashSpan - indicator.length;
+					const leftFill = "─".repeat(Math.max(0, Math.floor(space / 2)));
+					const rightFill = "─".repeat(Math.max(0, dashSpan - leftFill.length - indicator.length));
+					lines.push(truncateToWidth(theme.fg("accent", `└${leftFill}${indicator}${rightFill}┘`), width));
+				} else {
+					lines.push(theme.fg("accent", `└${"─".repeat(dashSpan)}┘`));
+				}
+
+				return lines;
+			}
+
+			function renderPreviewLines(preview: string, width: number): string[] {
+				const bodyWidth = Math.max(
+					1,
+					width - PREVIEW_BORDER_HORIZONTAL_OVERHEAD - 2 * PREVIEW_INNER_PADDING_HORIZONTAL,
+				);
+				const wrappedLines: string[] = [];
 				for (const rawLine of preview.split("\n")) {
-					if (printed >= MAX_PREVIEW_LINES) break;
-					const wrapped = wrapTextWithAnsi(rawLine || " ", Math.max(1, width - 4));
+					const wrapped = wrapTextWithAnsi(rawLine || " ", bodyWidth);
 					for (const line of wrapped) {
-						if (printed >= MAX_PREVIEW_LINES) break;
-						lines.push(truncateToWidth(`   ${theme.fg("dim", line)}`, width));
-						printed++;
+						wrappedLines.push(line);
 					}
 				}
-				if (printed >= MAX_PREVIEW_LINES) {
-					lines.push(truncateToWidth(theme.fg("dim", "   … preview truncated"), width));
+				const contentLines = wrappedLines.slice(0, MAX_PREVIEW_LINES);
+				const hidden = Math.max(0, wrappedLines.length - contentLines.length);
+				const boxWidth = previewBoxWidth(contentLines, width);
+				return renderBorderedPreviewBox(contentLines, boxWidth, hidden);
+			}
+
+			function addPreview(lines: string[], question: NormalisedQuestion, rows: Row[], width: number): void {
+				const preview = previewForFocusedRow(question, rows);
+				if (!preview) return;
+				lines.push("");
+				lines.push(...renderPreviewLines(preview, width));
+			}
+
+			function rowDisplayLabel(question: NormalisedQuestion, row: Row, rowNumber: number, selectedMulti: Set<number>): string {
+				if (row.kind === "option") {
+					const option = question.options[row.optionIndex];
+					if (!option) return `${rowNumber}.`;
+					const checkbox = question.multiSelect ? (selectedMulti.has(row.optionIndex) ? "[x] " : "[ ] ") : "";
+					return `${rowNumber}. ${checkbox}${option.label}`;
 				}
+				const label =
+					row.kind === "custom" ? "Type something." : row.kind === "done" ? "Done with this question" : "Chat about this";
+				return `${rowNumber}. ${label}`;
+			}
+
+			function adaptiveChoiceColumnWidth(
+				question: NormalisedQuestion,
+				rows: Row[],
+				width: number,
+				selectedMulti: Set<number>,
+			): number {
+				let desired = MIN_LEFT_COLUMN_WIDTH;
+				for (let i = 0; i < rows.length; i++) {
+					const row = rows[i];
+					if (!row) continue;
+					desired = Math.max(desired, 2 + visibleWidth(rowDisplayLabel(question, row, i + 1, selectedMulti)));
+				}
+				const ratioCapped = Math.min(desired, Math.floor(width * MAX_LEFT_COLUMN_RATIO));
+				const available = width - PREVIEW_COLUMN_GAP - MIN_PREVIEW_COLUMN_WIDTH;
+				return Math.max(MIN_LEFT_COLUMN_WIDTH, Math.min(ratioCapped, Math.max(1, available)));
+			}
+
+			function padToWidth(line: string, width: number): string {
+				const clipped = truncateToWidth(line, width);
+				return `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
+			}
+
+			function joinPreviewColumns(leftLines: string[], rightLines: string[], leftWidth: number, width: number): string[] {
+				const rightWidth = Math.max(1, width - leftWidth - PREVIEW_COLUMN_GAP);
+				const gap = " ".repeat(PREVIEW_COLUMN_GAP);
+				const rows = Math.max(leftLines.length, rightLines.length);
+				const out: string[] = [];
+				for (let i = 0; i < rows; i++) {
+					const left = padToWidth(leftLines[i] ?? "", leftWidth);
+					const right = truncateToWidth(rightLines[i] ?? "", rightWidth);
+					out.push(truncateToWidth(`${left}${gap}${right}`, width));
+				}
+				return out;
+			}
+
+			function renderChoiceLines(question: NormalisedQuestion, rows: Row[], width: number, selectedMulti: Set<number>): string[] {
+				const lines: string[] = [];
+				for (let i = 0; i < rows.length; i++) {
+					const row = rows[i];
+					if (!row) continue;
+					const focused = i === rowIndex;
+					const prefix = focused ? theme.fg("accent", "> ") : "  ";
+
+					if (row.kind === "option") {
+						const option = question.options[row.optionIndex];
+						if (!option) continue;
+						lines.push(
+							truncateToWidth(
+								prefix + theme.fg(focused ? "accent" : "text", rowDisplayLabel(question, row, i + 1, selectedMulti)),
+								width,
+							),
+						);
+						if (option.description) {
+							addWrapped(lines, option.description, width, "     ", (line) => theme.fg("muted", line));
+						}
+						continue;
+					}
+
+					lines.push(
+						truncateToWidth(
+							prefix + theme.fg(focused ? "accent" : "muted", rowDisplayLabel(question, row, i + 1, selectedMulti)),
+							width,
+						),
+					);
+				}
+				return lines;
+			}
+
+			function renderChoicesWithPreview(question: NormalisedQuestion, rows: Row[], width: number, selectedMulti: Set<number>): string[] {
+				const preview = previewForFocusedRow(question, rows);
+				if (!preview || width < PREVIEW_MIN_WIDTH) {
+					const lines = renderChoiceLines(question, rows, width, selectedMulti);
+					addPreview(lines, question, rows, width);
+					return lines;
+				}
+
+				const leftWidth = adaptiveChoiceColumnWidth(question, rows, width, selectedMulti);
+				const rightWidth = Math.max(1, width - leftWidth - PREVIEW_COLUMN_GAP);
+				if (rightWidth < MIN_PREVIEW_COLUMN_WIDTH) {
+					const lines = renderChoiceLines(question, rows, width, selectedMulti);
+					addPreview(lines, question, rows, width);
+					return lines;
+				}
+
+				return joinPreviewColumns(
+					renderChoiceLines(question, rows, leftWidth, selectedMulti),
+					renderPreviewLines(preview, rightWidth),
+					leftWidth,
+					width,
+				);
 			}
 
 			function answerSummary(answer: AnswerDetails | undefined): string | undefined {
@@ -600,27 +765,7 @@ async function askWithStructuredDialog(ctx: ExtensionContext, questions: Normali
 				lines.push("");
 
 				const selectedMulti = multiSelections.get(currentTab) ?? new Set<number>();
-				for (let i = 0; i < rows.length; i++) {
-					const row = rows[i];
-					const focused = i === rowIndex;
-					const prefix = focused ? theme.fg("accent", "> ") : "  ";
-
-					if (row.kind === "option") {
-						const option = question.options[row.optionIndex];
-						const checkbox = question.multiSelect ? (selectedMulti.has(row.optionIndex) ? "[x] " : "[ ] ") : "";
-						const label = `${i + 1}. ${checkbox}${option.label}`;
-						lines.push(truncateToWidth(prefix + theme.fg(focused ? "accent" : "text", label), width));
-						if (option.description) {
-							addWrapped(lines, option.description, width, "     ", (line) => theme.fg("muted", line));
-						}
-						continue;
-					}
-
-					const label = row.kind === "custom" ? "Type something." : row.kind === "done" ? "Done with this question" : "Chat about this";
-					lines.push(truncateToWidth(prefix + theme.fg(focused ? "accent" : "muted", `${i + 1}. ${label}`), width));
-				}
-
-				addPreview(lines, question, rows, width);
+				lines.push(...renderChoicesWithPreview(question, rows, width, selectedMulti));
 
 				if (editMode) {
 					lines.push("");
