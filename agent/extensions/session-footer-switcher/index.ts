@@ -1,4 +1,6 @@
 // Session switcher as a left-side overlay.
+// The panel starts with a "New session" entry (equivalent to /new), followed
+// by the list of saved sessions.
 // Toggle shortcut:
 //   Command+Shift+Left - requires terminal support for Super-modified keys
 // Manual fallback: /sessions
@@ -45,6 +47,8 @@ const GLOBAL_STATE_KEY = "__sessionFooterSwitcherState";
 
 type FocusTarget = EditorComponent & Partial<Focusable>;
 type Cleanup = () => void;
+// Result returned by the overlay: switch to an existing session, or start a new one (/new).
+type OverlayResult = { type: "switch"; path: string } | { type: "new" };
 
 interface GlobalState {
 	cleanup?: Cleanup;
@@ -208,6 +212,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	private readonly theme: Theme;
 	private readonly ctx: ExtensionContext;
 	private readonly onSwitch: (path: string) => void;
+	private readonly onNewSession: () => void;
 	private readonly onClose: () => void;
 
 	constructor(
@@ -215,12 +220,14 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		theme: Theme,
 		ctx: ExtensionContext,
 		onSwitch: (path: string) => void,
+		onNewSession: () => void,
 		onClose: () => void,
 	) {
 		this.tui = tui;
 		this.theme = theme;
 		this.ctx = ctx;
 		this.onSwitch = onSwitch;
+		this.onNewSession = onNewSession;
 		this.onClose = onClose;
 		void this.reload();
 	}
@@ -249,12 +256,15 @@ class SessionSwitcherOverlay implements Component, Focusable {
 			if (seq !== this.loadSeq) return;
 
 			this.sessions = items;
+			this.scrollOffset = 0;
 			if (this.sessions.length === 0) {
+				// Only the "New session" entry remains selectable.
 				this.selectedIndex = 0;
-				this.scrollOffset = 0;
 			} else {
-				this.selectedIndex = Math.max(0, this.sessions.findIndex((s) => s.info.path === this.currentPath()));
-				this.scrollOffset = 0;
+				// Index 0 is the "New session" entry; sessions occupy 1..N.
+				const currentIdx = this.sessions.findIndex((s) => s.info.path === this.currentPath());
+				this.selectedIndex = currentIdx >= 0 ? currentIdx + 1 : 0;
+				this.ensureSelectedVisible();
 			}
 		} catch (error) {
 			if (seq !== this.loadSeq) return;
@@ -320,68 +330,77 @@ class SessionSwitcherOverlay implements Component, Focusable {
 			return lines;
 		}
 
-		if (this.loading && this.sessions.length === 0) {
-			lines.push(border("│") + padLine(th.fg("dim", "loading sessions...")) + border("│"));
-			lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
-			return lines;
-		}
-
-		if (this.sessions.length === 0) {
-			lines.push(border("│") + padLine(th.fg("dim", "no saved sessions")) + border("│"));
-			lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
-			return lines;
-		}
-
 		// Subtitle
-		const currentIdx = this.selectedIndex + 1;
-		const count = `${currentIdx}/${this.sessions.length}`;
-		const subtitle = ` ${count} - ${this.sessions.length} sessions `;
+		const sessionCount = this.sessions.length;
+		const subtitle =
+			this.selectedIndex === 0
+				? ` new session - ${sessionCount} saved `
+				: ` ${this.selectedIndex}/${sessionCount} - ${sessionCount} sessions `;
 		lines.push(border("│") + padLine(th.fg("dim", subtitle)) + border("│"));
 		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
 
-		// Scroll indicators
-		const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
-		const maxScroll = Math.max(0, this.sessions.length - visibleCount);
-		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+		// "New session" entry — always available at the top (equivalent to /new).
+		lines.push(border("│") + this.renderNewSessionRow(innerW) + border("│"));
+		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
 
-		const canScrollUp = this.scrollOffset > 0;
-		const canScrollDown = this.scrollOffset < maxScroll;
+		// Session list area
+		if (this.loading && this.sessions.length === 0) {
+			lines.push(border("│") + padLine(th.fg("dim", "loading sessions...")) + border("│"));
+		} else if (this.sessions.length === 0) {
+			lines.push(border("│") + padLine(th.fg("dim", "no saved sessions")) + border("│"));
+		} else {
+			// Scroll indicators
+			const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
+			const maxScroll = Math.max(0, this.sessions.length - visibleCount);
+			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
-		if (canScrollUp || canScrollDown) {
-			const upArrow = canScrollUp ? "^" : "-";
-			const downArrow = canScrollDown ? "v" : "-";
-			const scrollInfo = ` ${upArrow} ${this.scrollOffset + 1}-${this.scrollOffset + visibleCount} ${downArrow} `;
-			lines.push(border("│") + padLine(th.fg("dim", scrollInfo)) + border("│"));
-		}
+			const canScrollUp = this.scrollOffset > 0;
+			const canScrollDown = this.scrollOffset < maxScroll;
 
-		// Session items
-		for (let i = this.scrollOffset; i < this.scrollOffset + visibleCount && i < this.sessions.length; i++) {
-			lines.push(border("│") + this.renderSessionItem(this.sessions[i]!, i, innerW) + border("│"));
-		}
+			if (canScrollUp || canScrollDown) {
+				const upArrow = canScrollUp ? "^" : "-";
+				const downArrow = canScrollDown ? "v" : "-";
+				const scrollInfo = ` ${upArrow} ${this.scrollOffset + 1}-${this.scrollOffset + visibleCount} ${downArrow} `;
+				lines.push(border("│") + padLine(th.fg("dim", scrollInfo)) + border("│"));
+			}
 
-		// Pad if needed
-		for (let i = this.sessions.length; i < visibleCount; i++) {
-			lines.push(border("│") + " ".repeat(innerW) + border("│"));
+			// Session items
+			for (let i = this.scrollOffset; i < this.scrollOffset + visibleCount && i < this.sessions.length; i++) {
+				lines.push(border("│") + this.renderSessionItem(this.sessions[i]!, i, innerW) + border("│"));
+			}
 		}
 
 		// Footer
 		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
-		const selected = this.selectedSession();
-		if (selected?.summary.detail) {
-			const detail = truncateToWidth(` ${asciiDisplayText(selected.summary.detail)} `, innerW, "...", true);
+		const selectedDetail =
+			this.selectedIndex === 0 ? "Start a fresh session (same as /new)" : this.selectedSession()?.summary.detail;
+		if (selectedDetail) {
+			const detail = truncateToWidth(` ${asciiDisplayText(selectedDetail)} `, innerW, "...", true);
 			lines.push(border("│") + th.fg("dim", detail) + border("│"));
 		}
 		const noticeLine = this.notice ? ` ${th.fg("warning", this.notice)} ` : "";
-		const help = noticeLine || " up/down navigate - enter switch - esc close ";
+		const help = noticeLine || " up/down navigate - enter select - esc close ";
 		lines.push(border("│") + padLine(th.fg("dim", help)) + border("│"));
 		lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
 
 		return lines;
 	}
 
+	private renderNewSessionRow(width: number): string {
+		const th = this.theme;
+		const isSelected = this.selectedIndex === 0;
+		const marker = isSelected ? ">" : " ";
+		const line = truncateToWidth(`${marker}  +  New session`, width, "...", true);
+		if (isSelected) {
+			return th.bg("selectedBg", th.fg("accent", th.bold(line)));
+		}
+		return th.fg("accent", line);
+	}
+
 	private renderSessionItem(item: SessionItem, index: number, width: number): string {
 		const th = this.theme;
-		const isSelected = index === this.selectedIndex;
+		// Sessions occupy unified indices 1..N (index 0 is the "New session" entry).
+		const isSelected = index === this.selectedIndex - 1;
 		const isCurrent = item.info.path === this.currentPath();
 		const marker = isSelected ? ">" : " ";
 		const number = `${index + 1}.`.padStart(3, " ");
@@ -402,28 +421,45 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	}
 
 	private selectedSession(): SessionItem | undefined {
-		return this.sessions[this.selectedIndex];
+		if (this.selectedIndex === 0) return undefined;
+		return this.sessions[this.selectedIndex - 1];
 	}
 
 	private move(delta: number): void {
-		if (this.sessions.length === 0) return;
+		// Total selectable rows: the "New session" entry plus every saved session.
+		const total = this.sessions.length + 1;
 		this.notice = undefined;
-		this.selectedIndex = (this.selectedIndex + delta + this.sessions.length) % this.sessions.length;
-
-		const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
-		const maxScroll = Math.max(0, this.sessions.length - visibleCount);
-
-		if (this.selectedIndex < this.scrollOffset) {
-			this.scrollOffset = this.selectedIndex;
-		} else if (this.selectedIndex >= this.scrollOffset + visibleCount) {
-			this.scrollOffset = this.selectedIndex - visibleCount + 1;
-		}
-		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
-
+		this.selectedIndex = (this.selectedIndex + delta + total) % total;
+		this.ensureSelectedVisible();
 		this.tui.requestRender();
 	}
 
+	private ensureSelectedVisible(): void {
+		if (this.selectedIndex <= 0) return; // "New session" entry — no session scrolling needed.
+		const sessionIdx = this.selectedIndex - 1;
+		const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
+		const maxScroll = Math.max(0, this.sessions.length - visibleCount);
+
+		if (sessionIdx < this.scrollOffset) {
+			this.scrollOffset = sessionIdx;
+		} else if (sessionIdx >= this.scrollOffset + visibleCount) {
+			this.scrollOffset = sessionIdx - visibleCount + 1;
+		}
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+	}
+
 	private confirmSelection(): void {
+		// Index 0 is the "New session" entry → behaves like /new.
+		if (this.selectedIndex === 0) {
+			if (!this.ctx.isIdle()) {
+				this.notice = "wait until idle";
+				this.tui.requestRender();
+				return;
+			}
+			this.onNewSession();
+			return;
+		}
+
 		const selected = this.selectedSession();
 		if (!selected) return;
 
@@ -712,14 +748,15 @@ export default function (pi: ExtensionAPI) {
 			if (overlayOpen) return;
 			overlayOpen = true;
 			try {
-				const selectedPath = await ctx.ui.custom<string | undefined>(
+				const result = await ctx.ui.custom<OverlayResult | undefined>(
 					(tui, theme, _keybindings, done) => {
 						closeCurrentOverlay = () => done(undefined);
 						return new SessionSwitcherOverlay(
 							tui,
 							theme,
 							ctx,
-							(path) => done(path),
+							(path) => done({ type: "switch", path }),
+							() => done({ type: "new" }),
 							() => done(undefined),
 						);
 					},
@@ -739,12 +776,17 @@ export default function (pi: ExtensionAPI) {
 					},
 				);
 
-				if (!selectedPath) return;
+				if (!result) return;
 				if (!submitText) {
 					ctx.ui.notify("Editor not available", "error");
 					return;
 				}
-				pendingSwitchPath = selectedPath;
+				// Start a brand-new session — same effect as typing /new.
+				if (result.type === "new") {
+					submitText("/new");
+					return;
+				}
+				pendingSwitchPath = result.path;
 				submitText(`/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
