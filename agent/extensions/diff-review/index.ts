@@ -28,6 +28,13 @@ import { EditorShortcutBridge } from "./src/ui/editor-bridge.ts";
 import { DiffReviewFooter } from "./src/ui/footer.ts";
 import { isOverlayOpen, openOverlay } from "./src/ui/overlay.ts";
 
+// Shared focus-chain contract with the twitter-statusline extension (over
+// globalThis so the two extensions cooperate without importing each other).
+type DiffChainGlobal = typeof globalThis & {
+	__piDiffChain?: { focusFooter: () => void; isFooterFocused: () => boolean };
+	__piTwitterChain?: { focusPreview: () => void; isPreviewFocused: () => boolean };
+};
+
 export default function diffReviewExtension(pi: ExtensionAPI) {
 	let debugKeysUntil = 0;
 	let persistWarningShown = false;
@@ -233,6 +240,16 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			return component;
 		});
 
+		// Publish a focus-chain handle so the twitter-statusline extension can hand
+		// focus down to this footer (input → Twitter → diff). See chain.ts in the
+		// twitter-statusline extension for the matching contract.
+		(globalThis as DiffChainGlobal).__piDiffChain = {
+			focusFooter: () => {
+				activeFooter?.focus();
+			},
+			isFooterFocused: () => activeFooter?.focused === true,
+		};
+
 		// Layer 1: raw terminal input. Also powers /review debug-keys. It stays
 		// passive while the overlay is open so the overlay owns its own keys.
 		const unsubInput = ctx.ui.onTerminalInput((data) => {
@@ -250,6 +267,13 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 				matchesKey(data, Key.down) &&
 				ctx.ui.getEditorText().trim().length === 0
 			) {
+				// Focus chain: yield ↓ to the twitter-statusline preview first when it
+				// is present and not already focused; its listener (registered after
+				// ours) then consumes the key. Without Twitter, focus our footer.
+				const twitter = (globalThis as DiffChainGlobal).__piTwitterChain;
+				if (twitter && !twitter.isPreviewFocused()) {
+					return undefined;
+				}
 				activeFooter.focus();
 				return { consume: true };
 			}
@@ -279,6 +303,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			ctx.ui.setFooter(undefined);
 			activeFooter = undefined;
 			activeEditor = undefined;
+			delete (globalThis as DiffChainGlobal).__piDiffChain;
 		});
 	});
 }

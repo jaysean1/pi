@@ -10,9 +10,9 @@ import type {
 import {
 	type Component,
 	type Focusable,
-	type TUI,
 	Key,
 	matchesKey,
+	type TUI,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -39,7 +39,9 @@ export class DiffReviewFooter implements Component, Focusable {
 		private readonly open: () => void,
 		private readonly focusEditor: () => void,
 	) {
-		this.unsubscribeBranch = footerData.onBranchChange(() => this.requestRender());
+		this.unsubscribeBranch = footerData.onBranchChange(() =>
+			this.requestRender(),
+		);
 	}
 
 	get focused(): boolean {
@@ -72,11 +74,22 @@ export class DiffReviewFooter implements Component, Focusable {
 			this.open();
 			return;
 		}
-		if (
-			matchesKey(data, Key.up) ||
-			matchesKey(data, Key.left) ||
-			matchesKey(data, Key.escape)
-		) {
+		// Focus chain: ↑ walks up to the twitter-statusline preview when present;
+		// ← / Esc jump straight back to the input editor.
+		if (matchesKey(data, Key.up)) {
+			const twitter = (
+				globalThis as {
+					__piTwitterChain?: { focusPreview: () => void };
+				}
+			).__piTwitterChain;
+			if (twitter) {
+				twitter.focusPreview();
+				return;
+			}
+			this.focusEditor();
+			return;
+		}
+		if (matchesKey(data, Key.left) || matchesKey(data, Key.escape)) {
 			this.focusEditor();
 		}
 	}
@@ -121,41 +134,34 @@ export class DiffReviewFooter implements Component, Focusable {
 		action: string,
 	): string {
 		const buttonRaw = ` ${icon} ${action} `;
-		const hintRaw = this._focused ? " enter open · ↑ input" : " ↓ focus";
+		const hintRaw = this._focused ? "enter open · ↑ input" : "↓ focus";
 		const buttonW = visibleWidth(buttonRaw);
-		const hintW = visibleWidth(hintRaw);
 
 		if (width <= buttonW + 1) {
-			return this.padTo(this.renderButton(truncateToWidth(buttonRaw, width)), width);
-		}
-		if (width <= buttonW + hintW + 1) {
-			return this.padTo(this.renderButton(buttonRaw), width);
+			return this.padTo(
+				this.renderButton(truncateToWidth(buttonRaw, width)),
+				width,
+			);
 		}
 
-		const minGap = 2;
-		const statusGap = status ? "  " : "";
-		let statusRaw = status;
-		let rightW =
-			visibleWidth(statusRaw) +
-			visibleWidth(statusGap) +
-			buttonW +
-			hintW;
-		if (statusRaw && rightW + minGap > width) {
-			statusRaw = "";
-			rightW = buttonW + hintW;
-		}
-		const leftRoom = Math.max(0, width - rightW - minGap);
-		const fittedLeft = truncateToWidth(pathLabel, leftRoom, "...");
-		const gap = Math.max(
-			minGap,
-			width - visibleWidth(fittedLeft) - rightW,
+		const statusSegment = status
+			? { raw: status, rendered: this.theme.fg("text", status) }
+			: undefined;
+		const trailingSegments = [
+			statusSegment,
+			{ raw: buttonRaw, rendered: this.renderButton(buttonRaw) },
+			{ raw: hintRaw, rendered: this.theme.fg("dim", hintRaw) },
+		].filter((part): part is { raw: string; rendered: string } =>
+			Boolean(part),
 		);
-		const statusText = statusRaw
-			? `${this.theme.fg("text", statusRaw)}${statusGap}`
-			: "";
-		return this.padTo(
-			`${this.theme.fg("dim", fittedLeft)}${" ".repeat(gap)}${statusText}${this.renderButton(buttonRaw)}${this.theme.fg("dim", hintRaw)}`,
+
+		return this.composeLeadingLine(
 			width,
+			{
+				raw: pathLabel,
+				render: (text) => this.theme.fg("dim", text),
+			},
+			trailingSegments,
 		);
 	}
 
@@ -223,43 +229,25 @@ export class DiffReviewFooter implements Component, Focusable {
 		}
 		statsParts.push(contextPercentText);
 
-		let statsLeft = statsParts.join(" ");
-		let statsLeftWidth = visibleWidth(statsLeft);
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
+		const statsLeft = statsParts.join(" ");
+		const statsLeftWidth = visibleWidth(statsLeft);
 
 		const modelName = this.ctx.model?.id || "no-model";
 		let rightSide = modelName;
 		if (this.footerData.getAvailableProviderCount() > 1 && this.ctx.model) {
 			const withProvider = `(${this.ctx.model.provider}) ${modelName}`;
-			if (statsLeftWidth + 2 + visibleWidth(withProvider) <= width) {
+			if (
+				statsLeftWidth + visibleWidth(" · ") + visibleWidth(withProvider) <=
+				width
+			) {
 				rightSide = withProvider;
 			}
 		}
 
-		const rightSideWidth = visibleWidth(rightSide);
-		const availableForRight = width - statsLeftWidth - 2;
-		let statsLine: string;
-		if (statsLeftWidth + 2 + rightSideWidth <= width) {
-			statsLine =
-				statsLeft +
-				" ".repeat(width - statsLeftWidth - rightSideWidth) +
-				rightSide;
-		} else if (availableForRight > 0) {
-			const fittedRight = truncateToWidth(rightSide, availableForRight, "");
-			statsLine =
-				statsLeft +
-				" ".repeat(
-					Math.max(0, width - statsLeftWidth - visibleWidth(fittedRight)),
-				) +
-				fittedRight;
-		} else {
-			statsLine = statsLeft;
-		}
-
-		return truncateToWidth(this.theme.fg("dim", statsLine), width);
+		return this.composeSimpleLine(width, [
+			{ raw: statsLeft, rendered: this.theme.fg("dim", statsLeft) },
+			{ raw: rightSide, rendered: this.theme.fg("dim", rightSide) },
+		]);
 	}
 
 	private renderExtensionStatusLines(width: number): string[] {
@@ -283,8 +271,43 @@ export class DiffReviewFooter implements Component, Focusable {
 		return this._focused ? this.theme.bg("selectedBg", label) : label;
 	}
 
+	private composeLeadingLine(
+		width: number,
+		leading: { raw: string; render: (text: string) => string },
+		trailingSegments: { raw: string; rendered: string }[],
+	): string {
+		const separator = " · ";
+		const trailingWidth =
+			trailingSegments.reduce(
+				(sum, segment) => sum + visibleWidth(segment.raw),
+				0,
+			) +
+			visibleWidth(separator) * trailingSegments.length;
+		const leadingRoom = Math.max(0, width - trailingWidth);
+		const fittedLeading = truncateToWidth(leading.raw, leadingRoom, "...");
+		const segments = [
+			{ raw: fittedLeading, rendered: leading.render(fittedLeading) },
+			...trailingSegments,
+		].filter((segment) => segment.raw.length > 0);
+		return this.composeSimpleLine(width, segments);
+	}
+
+	private composeSimpleLine(
+		width: number,
+		segments: { raw: string; rendered: string }[],
+	): string {
+		const separator = this.theme.fg("dim", " · ");
+		const line = segments.map((segment) => segment.rendered).join(separator);
+		return this.padTo(
+			truncateToWidth(line, width, this.theme.fg("dim", "...")),
+			width,
+		);
+	}
+
 	private padTo(text: string, width: number): string {
 		const pad = width - visibleWidth(text);
-		return pad > 0 ? text + " ".repeat(pad) : truncateToWidth(text, width, "...");
+		return pad > 0
+			? text + " ".repeat(pad)
+			: truncateToWidth(text, width, "...");
 	}
 }
