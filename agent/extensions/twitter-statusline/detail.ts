@@ -90,7 +90,7 @@ export class TweetDetailOverlay implements Component, Focusable {
 			this.close();
 			return;
 		}
-		if (matchesKey(data, "d")) {
+		if (matchesKey(data, Key.enter)) {
 			this.openCurrentTweetExternal();
 			return;
 		}
@@ -222,7 +222,7 @@ export class TweetDetailOverlay implements Component, Focusable {
 			maxScroll > 0
 				? ` ${this.scroll + 1}-${this.scroll + visible.length}/${content.length} ·`
 				: "";
-		const hint = `${more} ↑/↓ scroll · d detail · Esc close`;
+		const hint = `${more} ↑/↓ scroll · Enter detail · Esc close`;
 		const footer = this.actionStatus
 			? `${hint} · ${this.actionStatus.message}`
 			: hint;

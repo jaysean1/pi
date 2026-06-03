@@ -5,12 +5,27 @@ diff-review footer (a `belowEditor` widget). Press **↓** from an empty input t
 focus it, use **Tab** to choose **View / All**, use **←/→** to move between
 tweets, and **Enter** to open a read-only detail or full-screen browser overlay.
 
+The preview is a single compact line: **username · publish time**, the **like
+count**, and the **post content**, with the **View / All** buttons pinned to the
+far right. When the middle overflows it is ellipsis-truncated (`…`) just before
+the buttons.
+
+Each field is color-coded by its nature so the line is easy to scan:
+
+| Field          | Theme color                         | Meaning              |
+|----------------|-------------------------------------|----------------------|
+| display name   | `accent` (bold when focused)        | author identity      |
+| `@handle`      | `muted`                             | secondary identity   |
+| `· time`        | `dim`                               | metadata             |
+| `♥ likes`       | `success` (green)                   | engagement metric    |
+| post content   | `text` when focused, `dim` when idle| the tweet body       |
+| `(stale)`      | `warning`                           | cache is stale       |
+
 ```
 ┌─ input ─────────────────────────────────────────────┐
 │ >                                                    │
 └──────────────────────────────────────────────────────┘
-  🐦 Tim✨ @timyangnet · ♥ 55  🔁 5   [View]  All        ← this widget
-  花了半天实测 Karpathy 提到的 LLM 知识库玩法…
+  Tim✨ @timyangnet · 2026-04-04 14:33  ♥ 55  花了半天实测 Karpathy…  [View]  All   ← this widget
 ~/.pi (main) · 📁 files · ↓ focus                          ← diff-review footer
 $0.000 (sub) 0.0%/1.0M · (anthropic) claude-opus-4-8
 ```
@@ -30,11 +45,15 @@ credential handling is needed. Verify with `twitter whoami`.
   while the preview is focused. After 10 minutes without a successful refresh the
   bar shows `(stale)`.
 - **View** → read-only overlay of the current tweet + replies (`twitter tweet`).
-- **View action**: press **d** to open the tweet detail URL in the local Chrome
-  **X** app. Set `TWITTER_STATUSLINE_X_APP_ID` or
-  `TWITTER_STATUSLINE_CHROME_PROFILE` if Chrome uses a different app/profile.
-  If X is already open, the current PWA window is navigated to the tweet instead
-  of opening another window.
+- **View action**: press **Enter** to open the tweet in **Google Chrome**, reusing
+  an already-open tab. Via AppleScript it looks for an existing `x.com` /
+  `twitter.com` tab in any running Chrome window, navigates that tab to the tweet
+  and focuses its window; if none exists it opens a single new tab in the front
+  window. Pressing **Enter** on another tweet reuses the same tab — it never piles
+  up new windows. (Chrome's installed **X** PWA / app-mode windows can't be
+  scripted or reliably reused from the command line, so a normal browser tab is
+  used instead.) Falls back to `open -b com.google.Chrome <url>` (a plain tab, no
+  reuse) if the AppleScript path fails.
 - **All** → full-screen, scrollable list of the cached hot tweets; `Enter` opens
   a tweet's detail, **r** refreshes recent hot tweets, `Esc` returns to the list.
 - Everything is best-effort: any CLI/network failure falls back to the previous
@@ -72,7 +91,7 @@ footer's **↑** hands focus back to the preview.
 | `index.ts`      | Wiring: widget, timers, input chain, commands    |
 | `twitter-cli.ts`| `twitter` CLI wrapper, JSON parsing, disk cache  |
 | `render.ts`     | Width-aware tweet formatting helpers             |
-| `preview.ts`    | The belowEditor rotating preview (Focusable)     |
+| `preview.ts`    | The belowEditor single-line preview (Focusable)  |
 | `detail.ts`     | View: single tweet + replies overlay (read-only) |
 | `browser.ts`    | All: full-screen tweet list overlay (read-only)  |
 | `chain.ts`      | Focus-chain contract with diff-review            |

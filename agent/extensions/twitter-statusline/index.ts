@@ -8,9 +8,6 @@
 // statusline never throws into the session.
 
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -38,9 +35,7 @@ import {
 const WIDGET_KEY = "twitter-statusline";
 const ROTATE_MS = 30_000;
 const REFRESH_MS = 30_000;
-const DEFAULT_X_CHROME_APP_ID = "lodlkdfmihgonocnmddehnfgiljnadcf";
 const CHROME_BUNDLE_ID = "com.google.Chrome";
-const X_APP_BUNDLE_PREFIX = "com.google.Chrome.app.";
 
 interface Store {
 	tweets: Tweet[];
@@ -80,39 +75,6 @@ export default function twitterStatusline(pi: ExtensionAPI) {
 		return `https://x.com/i/web/status/${encodeURIComponent(tweet.id)}`;
 	}
 
-	function xChromeAppId(): string {
-		return (
-			process.env.TWITTER_STATUSLINE_X_APP_ID?.trim() || DEFAULT_X_CHROME_APP_ID
-		);
-	}
-
-	function chromeProfileForApp(appId: string): string {
-		const configured = process.env.TWITTER_STATUSLINE_CHROME_PROFILE?.trim();
-		if (configured) return configured;
-		const chromeDir = path.join(
-			os.homedir(),
-			"Library",
-			"Application Support",
-			"Google",
-			"Chrome",
-		);
-		try {
-			for (const name of readdirSync(chromeDir)) {
-				const marker = path.join(
-					chromeDir,
-					name,
-					"Web Applications",
-					"Manifest Resources",
-					appId,
-				);
-				if (existsSync(marker)) return name;
-			}
-		} catch {
-			// Fall through to the common profile name.
-		}
-		return "Default";
-	}
-
 	function openWithLabel(label: string, args: string[]): Promise<void> {
 		return new Promise((resolve, reject) => {
 			execFile("open", args, (error, _stdout, stderr) => {
@@ -126,97 +88,80 @@ export default function twitterStatusline(pi: ExtensionAPI) {
 		});
 	}
 
-	function updateRunningXApp(url: string, appId: string): Promise<void> {
-		const bundleId = `${X_APP_BUNDLE_PREFIX}${appId}`;
-		const script = `
-on run argv
-	set targetUrl to item 1 of argv
-	set targetBundleId to item 2 of argv
-	tell application "System Events"
-		set matchingProcesses to application processes whose bundle identifier is targetBundleId
-		if (count of matchingProcesses) is 0 then return "missing"
-	end tell
-	tell application id targetBundleId to activate
-	delay 0.18
-	tell application "Google Chrome"
-		if (count of windows) is 0 then return "missing"
-		set URL of active tab of front window to targetUrl
-	end tell
-	tell application id targetBundleId to activate
-	return "updated"
-end run
-`;
+	// Reuse an already-open x.com / twitter.com tab in the running Chrome and
+	// navigate it to the tweet (then focus its window), so pressing Enter again
+	// reuses the same tab instead of opening a new window. Chrome PWA/app-mode
+	// windows cannot be driven by AppleScript, so we deliberately target a normal
+	// browser tab. The URL is passed as an argv item to avoid any quoting issues.
+	function openTweetInChromeTab(url: string): Promise<void> {
+		const script = `on run argv
+  set tweetURL to item 1 of argv
+  tell application "Google Chrome"
+    if (count of windows) is 0 then
+      make new window
+      set URL of active tab of front window to tweetURL
+      activate
+      return
+    end if
+    set reused to false
+    repeat with w in windows
+      set ti to 0
+      repeat with t in tabs of w
+        set ti to ti + 1
+        set u to (URL of t)
+        if u contains "x.com/" or u contains "twitter.com/" then
+          set URL of t to tweetURL
+          set active tab index of w to ti
+          set index of w to 1
+          set reused to true
+          exit repeat
+        end if
+      end repeat
+      if reused then exit repeat
+    end repeat
+    if not reused then
+      tell front window
+        make new tab with properties {URL:tweetURL}
+        set active tab index to (count of tabs)
+      end tell
+      set index of front window to 1
+    end if
+    activate
+  end tell
+end run`;
 		return new Promise((resolve, reject) => {
-			execFile(
-				"osascript",
-				["-e", script, url, bundleId],
-				{ timeout: 5_000 },
-				(error, stdout, stderr) => {
-					if (error) {
-						const detail = stderr?.toString().trim() || error.message;
-						reject(new Error(`Existing X app: ${detail}`));
-						return;
-					}
-					const result = stdout.toString().trim();
-					if (result === "updated") {
-						resolve();
-						return;
-					}
-					reject(new Error("Existing X app: not running"));
-				},
-			);
+			execFile("osascript", ["-e", script, url], (error, _stdout, stderr) => {
+				if (!error) {
+					resolve();
+					return;
+				}
+				const detail = stderr?.toString().trim() || error.message;
+				reject(new Error(`Chrome tab: ${detail}`));
+			});
 		});
 	}
 
-	async function openTweetInXApp(tweet: Tweet): Promise<void> {
+	async function openTweetInChrome(tweet: Tweet): Promise<void> {
 		const url = tweetUrl(tweet);
 		const errors: string[] = [];
-		const appId = xChromeAppId();
-		const profile = chromeProfileForApp(appId);
+
+		// Primary: navigate an existing x.com tab (or open one new tab) and focus
+		// it — repeated opens reuse the same tab rather than spawning new windows.
 		try {
-			await updateRunningXApp(url, appId);
+			await openTweetInChromeTab(url);
 			return;
 		} catch (error) {
 			errors.push(error instanceof Error ? error.message : String(error));
 		}
 
-		const attempts: Array<{ label: string; args: string[] }> = [
-			{
-				label: "Chrome X PWA",
-				args: [
-					"-n",
-					"-b",
-					CHROME_BUNDLE_ID,
-					"--args",
-					`--profile-directory=${profile}`,
-					`--app-id=${appId}`,
-					`--app-launch-url-for-shortcuts-menu-item=${url}`,
-				],
-			},
-			{
-				label: "Chrome app window",
-				args: [
-					"-n",
-					"-b",
-					CHROME_BUNDLE_ID,
-					"--args",
-					`--profile-directory=${profile}`,
-					`--app=${url}`,
-				],
-			},
-			{
-				label: "Google Chrome",
-				args: ["-b", CHROME_BUNDLE_ID, url],
-			},
-		];
-		for (const attempt of attempts) {
-			try {
-				await openWithLabel(attempt.label, attempt.args);
-				return;
-			} catch (error) {
-				errors.push(error instanceof Error ? error.message : String(error));
-			}
+		// Fallback: let macOS hand the URL to Chrome (a normal tab, no reuse).
+		try {
+			await openWithLabel("Google Chrome", ["-b", CHROME_BUNDLE_ID, url]);
+			return;
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
 		}
+
 		throw new Error(errors.join(" | ") || "no Chrome launch path available");
 	}
 
@@ -281,7 +226,7 @@ end run
 						theme,
 						tweet,
 						() => done(undefined),
-						openTweetInXApp,
+						openTweetInChrome,
 					);
 					overlay.setViewport(14);
 					return overlay;

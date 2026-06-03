@@ -13,12 +13,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { getDiffChain } from "./chain.ts";
-import {
-	authorWithTime,
-	fitWidth,
-	metricsPlain,
-	singleLine,
-} from "./render.ts";
+import { fitWidth, formatCount, singleLine } from "./render.ts";
 import type { Tweet } from "./twitter-cli.ts";
 
 export type PreviewAction = "view" | "all";
@@ -40,8 +35,6 @@ export interface PreviewDeps {
 	/** Return focus to the input editor (chain: ↑ / Esc). */
 	focusEditor: () => void;
 }
-
-const ICON = "🐦";
 
 export class TwitterPreview implements Component, Focusable {
 	private _focused = false;
@@ -138,7 +131,7 @@ export class TwitterPreview implements Component, Focusable {
 			return [this.renderStatusOnly(w)];
 		}
 
-		return [this.renderMetaLine(current, w), this.renderTextLine(current, w)];
+		return [this.renderLine(current, w)];
 	}
 
 	private renderStatusOnly(width: number): string {
@@ -151,50 +144,97 @@ export class TwitterPreview implements Component, Focusable {
 				? `unavailable — ${err}`
 				: "no tweets (check Chrome login / twitter CLI)";
 		}
-		return fitWidth(th.fg("dim", `${ICON} Twitter · ${msg}`), width);
+		return fitWidth(th.fg("dim", `Twitter · ${msg}`), width);
 	}
 
-	private renderMetaLine(t: Tweet, width: number): string {
+	// One compact line, color-coded by the nature of each field:
+	//   Name @handle · time  ♥ likes  post content…            [View]  All
+	//   │    │        │       │       └ content: text (focused) / dim (idle)
+	//   │    │        │       └ ♥ like count: success (green) — engagement
+	//   │    │        └ publish time: dim — metadata
+	//   │    └ @handle: muted — secondary identity
+	//   └ display name: accent (bold when focused) — author identity
+	// The action buttons stay pinned far-right; the middle (meta + content) is
+	// ellipsis-truncated just before the buttons when it overflows.
+	private renderLine(t: Tweet, width: number): string {
 		const th = this.theme;
 		const dim = (s: string) => th.fg("dim", s);
+		const id = (s: string) => s;
 		const color = this._focused ? "text" : "dim";
 
-		const actions = this.renderActions();
-		const staleStr = this.deps.isStale() ? "  (stale)" : "";
-		const right = actions + (staleStr ? dim(staleStr) : "");
-		const rightW = visibleWidth(this.actionsPlain()) + visibleWidth(staleStr);
-		const leftBudget = Math.max(8, width - rightW - 1);
+		// Far-right: View / All buttons (always the rightmost elements).
+		const right = this.renderActions();
+		const rightW = visibleWidth(this.actionsPlain());
 
-		const head = `${ICON} `;
-		const authorTxt = authorWithTime(t);
-		const metricsTxt = metricsPlain(t);
-		const fullPlain = `${head}${authorTxt}  ${metricsTxt}`;
+		// Reserve a gap so content never touches the buttons.
+		const gap = 2;
+		const leftBudget = Math.max(8, width - rightW - gap);
+
+		// --- Meta, split into individually-colored segments -------------------
+		const name = t.author.name?.trim() ?? "";
+		const handle = t.author.screenName?.trim().replace(/^@+/, "") ?? "";
+		const nameColor = (s: string) =>
+			this._focused ? th.bold(th.fg("accent", s)) : th.fg("accent", s);
+
+		type Seg = { text: string; render: (s: string) => string };
+		const segs: Seg[] = [];
+		const space = () => {
+			if (segs.length) segs.push({ text: " ", render: id });
+		};
+		if (name) segs.push({ text: name, render: nameColor });
+		if (handle) {
+			space();
+			segs.push({ text: `@${handle}`, render: (s) => th.fg("muted", s) });
+		}
+		if (!name && !handle)
+			segs.push({ text: "unknown", render: (s) => th.fg("muted", s) });
+		if (t.createdAtLocal) {
+			space();
+			segs.push({ text: `· ${t.createdAtLocal}`, render: dim });
+		}
+		segs.push({ text: "  ", render: id });
+		segs.push({
+			text: `♥ ${formatCount(t.metrics.likes)}`,
+			render: (s) => th.fg("success", s),
+		});
+		if (this.deps.isStale()) {
+			segs.push({ text: "  ", render: id });
+			segs.push({ text: "(stale)", render: (s) => th.fg("warning", s) });
+		}
+
+		const metaPlain = segs.map((s) => s.text).join("");
+		const metaColored = segs.map((s) => s.render(s.text)).join("");
+		const metaW = visibleWidth(metaPlain);
+
+		// --- Post content -----------------------------------------------------
+		const body =
+			singleLine(t.text) || (t.media.length ? "(media)" : "(no text)");
+
+		const sep = "  "; // between meta and content
+		const sepW = visibleWidth(sep);
+		const fullW = metaW + sepW + visibleWidth(body);
 
 		let leftRendered: string;
 		let leftW: number;
-		if (visibleWidth(fullPlain) <= leftBudget) {
-			leftRendered =
-				head + th.fg(color, authorTxt) + dim("  ") + dim(metricsTxt);
-			leftW = visibleWidth(fullPlain);
-		} else if (visibleWidth(`${head}${authorTxt}`) <= leftBudget) {
-			leftRendered = head + th.fg(color, authorTxt);
-			leftW = visibleWidth(`${head}${authorTxt}`);
+		if (fullW <= leftBudget) {
+			// Everything fits on the line.
+			leftRendered = metaColored + dim(sep) + th.fg(color, body);
+			leftW = fullW;
+		} else if (metaW + sepW + 2 <= leftBudget) {
+			// Keep the colored meta intact; ellipsis-truncate the content.
+			const contentBudget = leftBudget - metaW - sepW;
+			const fittedBody = fitWidth(body, contentBudget);
+			leftRendered = metaColored + dim(sep) + th.fg(color, fittedBody);
+			leftW = metaW + sepW + visibleWidth(fittedBody);
 		} else {
-			const truncated = fitWidth(`${head}${authorTxt}`, leftBudget);
-			leftRendered = th.fg(color, truncated);
+			// Even the meta overflows: ellipsis-truncate the whole left side.
+			const truncated = fitWidth(metaPlain, leftBudget);
+			leftRendered = th.fg("muted", truncated);
 			leftW = visibleWidth(truncated);
 		}
 
-		const pad = Math.max(1, width - leftW - rightW);
+		const pad = Math.max(gap, width - leftW - rightW);
 		return leftRendered + " ".repeat(pad) + right;
-	}
-
-	private renderTextLine(t: Tweet, width: number): string {
-		const th = this.theme;
-		const body =
-			singleLine(t.text) || (t.media.length ? "(media)" : "(no text)");
-		const color = this._focused ? "text" : "dim";
-		return th.fg(color, fitWidth(body, width));
 	}
 
 	private actionsPlain(): string {
