@@ -39,8 +39,6 @@ const MAX_TITLE_WIDTH = 240;
 const MAX_DETAIL_WIDTH = 320;
 const OVERLAY_WIDTH = "100%";
 const OVERLAY_VISIBLE_COUNT = 12;
-// Length of the short divider drawn beneath the "New session" row.
-const NEW_SESSION_RULE_WIDTH = 18;
 const INTERNAL_COMMAND_SWITCH_ARG = "--switch";
 const INTERNAL_COMMAND_PREFIX = `/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`;
 const DEBUG_KEYS_ARG = "debug-keys";
@@ -344,19 +342,19 @@ class SessionSwitcherOverlay implements Component, Focusable {
 			return lines;
 		}
 
-		// Header: bold title + dim subtitle.
+		// Header: a single line that pairs the bold title with the current
+		// position, e.g. "Sessions (3 of 26)" or "Sessions (new session)". Keeping
+		// title + counter on one row avoids the old two-line layout that looked
+		// misaligned at the top of the overlay.
 		const sessionCount = this.sessions.length;
-		const subtitle =
-			this.selectedIndex === 0
-				? `new session · ${sessionCount} saved`
-				: `${this.selectedIndex}/${sessionCount} · ${sessionCount} sessions`;
-		lines.push(pad(th.fg("accent", th.bold("Sessions"))));
-		lines.push(pad(th.fg("dim", subtitle)));
-		lines.push("");
+		const position =
+			this.selectedIndex === 0 ? "new session" : `${this.selectedIndex} of ${sessionCount}`;
+		lines.push(pad(`${th.fg("accent", th.bold("Sessions"))} ${th.fg("dim", `(${position})`)}`));
 
-		// "New session" entry — always available at the top (equivalent to /new).
-		lines.push(this.renderNewSessionRow(w));
-		lines.push(pad(rule(NEW_SESSION_RULE_WIDTH)));
+		// "New session" entry — rendered as a bordered button (equivalent to /new).
+		lines.push(...this.renderNewSessionRow(w));
+		// Divider separating the button from the saved-session list below.
+		lines.push(rule());
 
 		// Session list area.
 		if (this.loading && this.sessions.length === 0) {
@@ -390,18 +388,31 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		return lines;
 	}
 
-	private renderNewSessionRow(width: number): string {
+	// Render the "New session" entry as a small bordered button so it reads as a
+	// distinct, clickable-looking control rather than a plain list row. The box
+	// border is drawn in the accent color when selected and the muted border color
+	// otherwise; a "›" cursor sits to the left of the middle row.
+	private renderNewSessionRow(width: number): string[] {
 		const th = this.theme;
 		const isSelected = this.selectedIndex === 0;
-		const cursorChar = isSelected ? "›" : " ";
-		// Plain prefix drives the width math; color is applied afterwards so ANSI
-		// codes never throw off truncation.
-		const prefixPlain = ` ${cursorChar}  +  `;
-		const labelWidth = Math.max(1, width - visibleWidth(prefixPlain));
-		const body = `+  ${truncateToWidth("New session", labelWidth, "...")}`;
+		const content = "+  New session";
+		// Box layout: │ <space> label <space> │, so the inner width is the label cell
+		// plus the two padding spaces. Clamp to the overlay width (minus indent +
+		// borders) so the button never overflows on narrow terminals.
+		const innerWidth = Math.min(visibleWidth(content) + 2, Math.max(3, width - 6));
+		const labelWidth = Math.max(1, innerWidth - 2);
+		const label = truncateToWidth(content, labelWidth, "...");
+		const padCount = Math.max(0, labelWidth - visibleWidth(label));
+		const labelCell = `${label}${" ".repeat(padCount)}`;
+
+		const borderColor = isSelected ? "accent" : "border";
+		const top = th.fg(borderColor, `╭${"─".repeat(innerWidth)}╮`);
+		const bottom = th.fg(borderColor, `╰${"─".repeat(innerWidth)}╯`);
+		const side = th.fg(borderColor, "│");
+		const labelStyled = isSelected ? th.bold(th.fg("accent", labelCell)) : th.fg("accent", labelCell);
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
-		const styled = isSelected ? th.bold(th.fg("accent", body)) : th.fg("accent", body);
-		return ` ${cursor}  ${styled}`;
+
+		return [`    ${top}`, ` ${cursor}  ${side} ${labelStyled} ${side}`, `    ${bottom}`];
 	}
 
 	private renderSessionItem(item: SessionItem, index: number, width: number): string {
