@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "lib": ["es2023"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "types": [],
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../rpiv-mono/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@earendil-works/pi-tui": ["../rpiv-mono/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
+    }
+  },
+  "include": ["index.ts", "fullscreen-view.ts", "nowplaying.ts", "engine.ts", "data.ts", "auth.ts", "render.ts", "config.ts", "cookies.ts", "types.ts"]
+}

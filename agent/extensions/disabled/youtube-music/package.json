@@ -1,0 +1,17 @@
+{
+  "name": "pi-ext-youtube-music",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browse & play your private YouTube Music playlists inside pi (TUI), powered by youtube-music-cli as the playback engine.",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "youtubei.js": "^13.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12"
+  }
+}
