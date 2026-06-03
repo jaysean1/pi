@@ -5,8 +5,6 @@ import {
 	type Component,
 	type EditorComponent,
 	type Focusable,
-	Key,
-	matchesKey,
 } from "@earendil-works/pi-tui";
 import { isToggleKey } from "../platform/keys.ts";
 
@@ -23,7 +21,6 @@ export class EditorShortcutBridge implements EditorComponent, Focusable {
 	constructor(
 		private readonly base: EditorComponent,
 		private readonly onToggle: () => void,
-		private readonly focusReviewFooter: () => boolean,
 	) {}
 
 	get focused(): boolean {
@@ -123,14 +120,6 @@ export class EditorShortcutBridge implements EditorComponent, Focusable {
 	handleInput(data: string): void {
 		if (isToggleKey(data)) {
 			this.onToggle();
-			return;
-		}
-		if (
-			matchesKey(data, Key.down) &&
-			(this.base.getExpandedText?.() ?? this.base.getText()).trim().length ===
-				0 &&
-			this.focusReviewFooter()
-		) {
 			return;
 		}
 		(this.base as { handleInput?: (data: string) => void }).handleInput?.(data);

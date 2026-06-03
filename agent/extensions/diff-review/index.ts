@@ -3,7 +3,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { type EditorComponent, type Focusable, Key, matchesKey } from "@earendil-works/pi-tui";
+import type { EditorComponent, Focusable } from "@earendil-works/pi-tui";
 import {
 	COMMAND_DEMO,
 	COMMAND_OPEN,
@@ -25,32 +25,61 @@ import { demoFiles } from "./src/demo.ts";
 import { describeKeyInput, isToggleKey } from "./src/platform/keys.ts";
 import { openExternalFile, openReviewedFile } from "./src/platform/launcher.ts";
 import { EditorShortcutBridge } from "./src/ui/editor-bridge.ts";
-import { DiffReviewFooter } from "./src/ui/footer.ts";
 import { isOverlayOpen, openOverlay } from "./src/ui/overlay.ts";
+import { DiffReviewWidget } from "./src/ui/widget.ts";
 
-// Shared focus-chain contract with the twitter-statusline extension (over
-// globalThis so the two extensions cooperate without importing each other).
-type DiffChainGlobal = typeof globalThis & {
-	__piDiffChain?: { focusFooter: () => void; isFooterFocused: () => boolean };
-	__piTwitterChain?: { focusPreview: () => void; isPreviewFocused: () => boolean };
-};
+// aboveEditor widget key. The diff entry is a passive status line rendered just
+// above the input (the slot the now-disabled youtube-music bar used to occupy).
+const WIDGET_KEY = "diff-review";
 
 export default function diffReviewExtension(pi: ExtensionAPI) {
 	let debugKeysUntil = 0;
 	let persistWarningShown = false;
-	let activeFooter: DiffReviewFooter | undefined;
+	let activeWidget: DiffReviewWidget | undefined;
 	let activeEditor: (EditorComponent & Partial<Focusable>) | undefined;
 	// Session-cumulative change set, keyed by absolute path.
 	const changes = new Map<string, ChangeEntry>();
 
-	const focusReviewFooter = (): boolean => {
-		if (!activeFooter) return false;
-		activeFooter.focus();
-		return true;
+	const refreshReviewWidget = () => {
+		activeWidget?.requestRender();
 	};
 
-	const refreshReviewFooter = () => {
-		activeFooter?.requestRender();
+	// Keep the diff status line pinned to the very bottom of the aboveEditor stack
+	// (directly above the input), unaffected by the rpiv-todo overlay. setWidget
+	// removes-then-reinserts the key, so re-calling pinWidget moves us to the end of
+	// pi's aboveEditor map. The todo overlay re-registers its own widget when the
+	// `todo` tool runs and on session churn, which would otherwise push us up; we
+	// re-pin on a deferred macrotask so we settle *after* the todo overlay's
+	// synchronous re-registration, with a second pass to heal async churn (theme
+	// switch / cell-size invalidations).
+	const repinTimers = new Set<ReturnType<typeof setTimeout>>();
+	const pinWidget = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		ctx.ui.setWidget(
+			WIDGET_KEY,
+			(tui, theme) => {
+				activeWidget = new DiffReviewWidget(tui, theme, {
+					getFiles: () => buildFileDiffs(ctx.cwd, changes),
+				});
+				return activeWidget;
+			},
+			{ placement: "aboveEditor" },
+		);
+	};
+	const schedulePin = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		for (const t of repinTimers) clearTimeout(t);
+		repinTimers.clear();
+		for (const delay of [0, 150]) {
+			const timer = setTimeout(() => {
+				repinTimers.delete(timer);
+				try {
+					pinWidget(ctx);
+				} catch {}
+			}, delay);
+			timer.unref?.();
+			repinTimers.add(timer);
+		}
 	};
 
 	const warnPersistFailure = (
@@ -72,7 +101,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			replaceChanges(changes, new Map());
 			warnPersistFailure(ctx, "load", error);
 		} finally {
-			refreshReviewFooter();
+			refreshReviewWidget();
 		}
 	};
 
@@ -82,7 +111,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			warnPersistFailure(ctx, "save", error);
 		} finally {
-			refreshReviewFooter();
+			refreshReviewWidget();
 		}
 	};
 
@@ -99,7 +128,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			`Cleared ${total} tracked file(s); ${tracked.length} had changes to review.`,
 			"info",
 		);
-		refreshReviewFooter();
+		refreshReviewWidget();
 	};
 
 	const open = (ctx: ExtensionContext, mode: ReviewOpenMode = "auto") => {
@@ -215,6 +244,21 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 		saveChanges(ctx);
 	});
 
+	// Keep the diff status line pinned directly above the input. The rpiv-todo
+	// overlay registers/re-registers its widget when the `todo` tool runs and on
+	// session churn, which would push us up the aboveEditor stack; re-pinning
+	// afterwards moves us back to the bottom (closest to the input) with the todo
+	// list above us. Turn/agent boundaries are natural settle points that catch any
+	// todo create/complete/hide churn during a turn.
+	pi.on("tool_execution_end", (event, ctx) => {
+		if (event.toolName === "todo" && !event.isError) schedulePin(ctx);
+	});
+	pi.on("session_compact", (_event, ctx) => schedulePin(ctx));
+	pi.on("session_tree", (_event, ctx) => schedulePin(ctx));
+	pi.on("agent_start", (_event, ctx) => schedulePin(ctx));
+	pi.on("agent_end", (_event, ctx) => schedulePin(ctx));
+	pi.on("turn_end", (_event, ctx) => schedulePin(ctx));
+
 	// Two layers make the hotkey reliable across terminals, mirroring the
 	// session-footer-switcher extension: a raw-input safety net plus an editor
 	// wrapper that catches the key while the editor has focus.
@@ -222,36 +266,18 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 		loadChanges(ctx);
 		if (!ctx.hasUI) return;
 
-		ctx.ui.setFooter((tui, theme, footerData) => {
-			const component = new DiffReviewFooter(
-				tui,
-				theme,
-				ctx,
-				footerData,
-				() => buildFileDiffs(ctx.cwd, changes),
-				() => open(ctx),
-				() => {
-					if (!activeEditor) return;
-					tui.setFocus(activeEditor);
-					tui.requestRender();
-				},
-			);
-			activeFooter = component;
-			return component;
-		});
+		// Pin the diff status line directly above the input (the slot the now-disabled
+		// youtube-music bar used to occupy). Pin immediately for first-frame display,
+		// then re-pin after the dispatch settles so we sit *below* any aboveEditor
+		// widget the rpiv-todo overlay registers in its own session_start handler. The
+		// stack settles as [todo list] / [diff status] / [input].
+		pinWidget(ctx);
+		schedulePin(ctx);
 
-		// Publish a focus-chain handle so the twitter-statusline extension can hand
-		// focus down to this footer (input → Twitter → diff). See chain.ts in the
-		// twitter-statusline extension for the matching contract.
-		(globalThis as DiffChainGlobal).__piDiffChain = {
-			focusFooter: () => {
-				activeFooter?.focus();
-			},
-			isFooterFocused: () => activeFooter?.focused === true,
-		};
-
-		// Layer 1: raw terminal input. Also powers /review debug-keys. It stays
-		// passive while the overlay is open so the overlay owns its own keys.
+		// Raw terminal input safety net for the open-review shortcut (more reliable
+		// across terminals than the registered shortcut alone). Also powers
+		// /review debug-keys. Stays passive while the overlay is open so the overlay
+		// owns its own keys. No focus handling — the widget is a passive status line.
 		const unsubInput = ctx.ui.onTerminalInput((data) => {
 			if (Date.now() <= debugKeysUntil) {
 				ctx.ui.notify(
@@ -260,23 +286,6 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 				);
 			}
 			if (isOverlayOpen()) return undefined;
-			if (
-				activeFooter &&
-				activeEditor?.focused === true &&
-				!activeFooter.focused &&
-				matchesKey(data, Key.down) &&
-				ctx.ui.getEditorText().trim().length === 0
-			) {
-				// Focus chain: yield ↓ to the twitter-statusline preview first when it
-				// is present and not already focused; its listener (registered after
-				// ours) then consumes the key. Without Twitter, focus our footer.
-				const twitter = (globalThis as DiffChainGlobal).__piTwitterChain;
-				if (twitter && !twitter.isPreviewFocused()) {
-					return undefined;
-				}
-				activeFooter.focus();
-				return { consume: true };
-			}
 			if (isToggleKey(data)) {
 				open(ctx);
 				return { consume: true };
@@ -290,20 +299,17 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			const base =
 				previousFactory?.(tui, editorTheme, keybindings) ??
 				new CustomEditor(tui, editorTheme, keybindings);
-			activeEditor = new EditorShortcutBridge(
-				base,
-				() => open(ctx),
-				focusReviewFooter,
-			);
+			activeEditor = new EditorShortcutBridge(base, () => open(ctx));
 			return activeEditor;
 		});
 
 		pi.on("session_shutdown", () => {
+			for (const t of repinTimers) clearTimeout(t);
+			repinTimers.clear();
 			unsubInput();
-			ctx.ui.setFooter(undefined);
-			activeFooter = undefined;
+			ctx.ui.setWidget(WIDGET_KEY, undefined);
+			activeWidget = undefined;
 			activeEditor = undefined;
-			delete (globalThis as DiffChainGlobal).__piDiffChain;
 		});
 	});
 }
