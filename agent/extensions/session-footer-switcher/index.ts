@@ -1,4 +1,6 @@
-// Session switcher as a left-side overlay.
+// Session switcher as a bottom-anchored, full-width overlay (mirrors the
+// ask-user-question style: horizontal-rule borders, no vertical │ side borders,
+// so wide CJK glyphs can never collide with a right-hand border).
 // The panel starts with a "New session" entry (equivalent to /new), followed
 // by the list of saved sessions.
 // Toggle shortcut:
@@ -32,9 +34,13 @@ import {
 
 const COMMAND_OPEN = "sessions";
 const WIDGET_KEY = "session-footer-switcher";
-const MAX_TITLE_WIDTH = 56;
-const MAX_DETAIL_WIDTH = 96;
+// Keep cached summaries generous; rendering still truncates to the live overlay width.
+const MAX_TITLE_WIDTH = 240;
+const MAX_DETAIL_WIDTH = 320;
+const OVERLAY_WIDTH = "100%";
 const OVERLAY_VISIBLE_COUNT = 12;
+// Length of the short divider drawn beneath the "New session" row.
+const NEW_SESSION_RULE_WIDTH = 18;
 const INTERNAL_COMMAND_SWITCH_ARG = "--switch";
 const INTERNAL_COMMAND_PREFIX = `/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`;
 const DEBUG_KEYS_ARG = "debug-keys";
@@ -79,8 +85,30 @@ function cleanSingleLine(text: string | undefined, fallback: string): string {
 	return cleaned || fallback;
 }
 
+// Strip terminal escape sequences and decorative glyphs that leak in from
+// pasted terminal output (statuslines, rendered TUIs, progress bars). Left in
+// place they desync the column alignment: raw/unclosed ANSI codes bleed color
+// into neighbouring rows, and ambiguous-width block/box glyphs throw off width
+// math. Everything is collapsed to a space so word boundaries survive.
+function stripControlAndDecorations(text: string): string {
+	return (
+		text
+			// CSI / SGR sequences: ESC [ params intermediates final.
+			.replace(/\u001b\[[0-9;:?]*[ -/]*[@-~]/g, " ")
+			// OSC / APC / DCS sequences: ESC ]/_/P ... (BEL or ST terminator).
+			.replace(/\u001b[\]_P][\s\S]*?(?:\u0007|\u001b\\)/g, " ")
+			// Stray ESC plus any remaining C0/C1 control characters.
+			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+			// Box drawing, block elements, geometric shapes, misc symbols, dingbats,
+			// braille spinners, technical symbols (⌘⌥ etc.), variation selectors.
+			.replace(/[\u2300-\u23ff\u2500-\u27bf\u2800-\u28ff\u2b00-\u2bff\ufe00-\ufe0f]/g, " ")
+			// Emoji and pictographs (astral plane).
+			.replace(/[\u{1f000}-\u{1faff}]/gu, " ")
+	);
+}
+
 function normaliseMessageText(text: string): string {
-	return text
+	return stripControlAndDecorations(text)
 		.replace(/```[\s\S]*?```/g, " ")
 		.replace(/`([^`]+)`/g, "$1")
 		.replace(/https?:\/\/\S+/g, " ")
@@ -301,87 +329,63 @@ class SessionSwitcherOverlay implements Component, Focusable {
 
 	render(width: number): string[] {
 		const th = this.theme;
-		const innerW = Math.max(1, width - 2);
-		const border = (c: string) => th.fg("border", c);
-		const padLine = (s: string) => {
-			const w = visibleWidth(s);
-			return s + " ".repeat(Math.max(0, innerW - w));
-		};
+		const w = Math.max(1, width);
+		// Full-width horizontal rules replace the old box borders. With no vertical
+		// │ side borders, wide (CJK) glyphs can no longer collide with a right border.
+		const rule = (n = w) => th.fg("border", "─".repeat(Math.max(1, n)));
+		const pad = (s: string) => ` ${s}`;
 
 		const lines: string[] = [];
-
-		// Title bar
-		const title = " Sessions ";
-		const titleW = visibleWidth(title);
-		const sideW = Math.max(0, innerW - titleW);
-		const leftPad = Math.floor(sideW / 2);
-		const rightPad = sideW - leftPad;
-		lines.push(
-			border("╭") +
-				border("─".repeat(leftPad)) +
-				th.fg("accent", th.bold(title)) +
-				border("─".repeat(rightPad)) +
-				border("╮"),
-		);
+		lines.push(rule());
 
 		if (this.error) {
-			lines.push(border("│") + padLine(th.fg("error", this.error)) + border("│"));
-			lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
+			lines.push(pad(th.fg("error", this.error)));
+			lines.push(rule());
 			return lines;
 		}
 
-		// Subtitle
+		// Header: bold title + dim subtitle.
 		const sessionCount = this.sessions.length;
 		const subtitle =
 			this.selectedIndex === 0
-				? ` new session - ${sessionCount} saved `
-				: ` ${this.selectedIndex}/${sessionCount} - ${sessionCount} sessions `;
-		lines.push(border("│") + padLine(th.fg("dim", subtitle)) + border("│"));
-		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
+				? `new session · ${sessionCount} saved`
+				: `${this.selectedIndex}/${sessionCount} · ${sessionCount} sessions`;
+		lines.push(pad(th.fg("accent", th.bold("Sessions"))));
+		lines.push(pad(th.fg("dim", subtitle)));
+		lines.push("");
 
 		// "New session" entry — always available at the top (equivalent to /new).
-		lines.push(border("│") + this.renderNewSessionRow(innerW) + border("│"));
-		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
+		lines.push(this.renderNewSessionRow(w));
+		lines.push(pad(rule(NEW_SESSION_RULE_WIDTH)));
 
-		// Session list area
+		// Session list area.
 		if (this.loading && this.sessions.length === 0) {
-			lines.push(border("│") + padLine(th.fg("dim", "loading sessions...")) + border("│"));
+			lines.push(pad(th.fg("dim", "loading sessions...")));
 		} else if (this.sessions.length === 0) {
-			lines.push(border("│") + padLine(th.fg("dim", "no saved sessions")) + border("│"));
+			lines.push(pad(th.fg("dim", "no saved sessions")));
 		} else {
-			// Scroll indicators
 			const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
 			const maxScroll = Math.max(0, this.sessions.length - visibleCount);
 			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
 			const canScrollUp = this.scrollOffset > 0;
 			const canScrollDown = this.scrollOffset < maxScroll;
-
 			if (canScrollUp || canScrollDown) {
-				const upArrow = canScrollUp ? "^" : "-";
-				const downArrow = canScrollDown ? "v" : "-";
-				const scrollInfo = ` ${upArrow} ${this.scrollOffset + 1}-${this.scrollOffset + visibleCount} ${downArrow} `;
-				lines.push(border("│") + padLine(th.fg("dim", scrollInfo)) + border("│"));
+				const upArrow = canScrollUp ? "↑" : "·";
+				const downArrow = canScrollDown ? "↓" : "·";
+				const scrollInfo = `${upArrow} ${this.scrollOffset + 1}-${this.scrollOffset + visibleCount} ${downArrow}`;
+				lines.push(pad(th.fg("dim", scrollInfo)));
 			}
 
-			// Session items
 			for (let i = this.scrollOffset; i < this.scrollOffset + visibleCount && i < this.sessions.length; i++) {
-				lines.push(border("│") + this.renderSessionItem(this.sessions[i]!, i, innerW) + border("│"));
+				lines.push(this.renderSessionItem(this.sessions[i]!, i, w));
 			}
 		}
 
-		// Footer
-		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
-		const selectedDetail =
-			this.selectedIndex === 0 ? "Start a fresh session (same as /new)" : this.selectedSession()?.summary.detail;
-		if (selectedDetail) {
-			const detail = truncateToWidth(` ${asciiDisplayText(selectedDetail)} `, innerW, "...", true);
-			lines.push(border("│") + th.fg("dim", detail) + border("│"));
-		}
-		const noticeLine = this.notice ? ` ${th.fg("warning", this.notice)} ` : "";
-		const help = noticeLine || " up/down navigate - enter select - esc close ";
-		lines.push(border("│") + padLine(th.fg("dim", help)) + border("│"));
-		lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
+		// Footer: bottom rule and key hints.
+		lines.push(rule());
+		const help = this.notice ? th.fg("warning", this.notice) : "↑/↓ navigate · enter select · esc close";
+		lines.push(pad(th.fg("dim", help)));
 
 		return lines;
 	}
@@ -389,12 +393,15 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	private renderNewSessionRow(width: number): string {
 		const th = this.theme;
 		const isSelected = this.selectedIndex === 0;
-		const marker = isSelected ? ">" : " ";
-		const line = truncateToWidth(`${marker}  +  New session`, width, "...", true);
-		if (isSelected) {
-			return th.bg("selectedBg", th.fg("accent", th.bold(line)));
-		}
-		return th.fg("accent", line);
+		const cursorChar = isSelected ? "›" : " ";
+		// Plain prefix drives the width math; color is applied afterwards so ANSI
+		// codes never throw off truncation.
+		const prefixPlain = ` ${cursorChar}  +  `;
+		const labelWidth = Math.max(1, width - visibleWidth(prefixPlain));
+		const body = `+  ${truncateToWidth("New session", labelWidth, "...")}`;
+		const cursor = isSelected ? th.fg("accent", "›") : " ";
+		const styled = isSelected ? th.bold(th.fg("accent", body)) : th.fg("accent", body);
+		return ` ${cursor}  ${styled}`;
 	}
 
 	private renderSessionItem(item: SessionItem, index: number, width: number): string {
@@ -402,18 +409,21 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		// Sessions occupy unified indices 1..N (index 0 is the "New session" entry).
 		const isSelected = index === this.selectedIndex - 1;
 		const isCurrent = item.info.path === this.currentPath();
-		const marker = isSelected ? ">" : " ";
+		const cursorChar = isSelected ? "›" : " ";
 		const number = `${index + 1}.`.padStart(3, " ");
 		const currentMarker = isCurrent ? "*" : " ";
-		const prefix = `${marker} ${number} ${currentMarker} `;
-		const prefixWidth = visibleWidth(prefix);
-		const titleWidth = Math.max(1, width - prefixWidth);
+		// Plain prefix drives the width math; color is applied afterwards.
+		const prefixPlain = ` ${cursorChar} ${number} ${currentMarker} `;
+		const titleWidth = Math.max(1, width - visibleWidth(prefixPlain));
 		const titleText = truncateToWidth(asciiDisplayText(item.summary.title), titleWidth, "...");
-		const line = truncateToWidth(`${prefix}${titleText}`, width, "...", true);
-		if (isSelected) {
-			return th.bg("selectedBg", th.fg("accent", th.bold(line)));
-		}
-		return isCurrent ? th.fg("success", line) : th.fg("text", line);
+		const body = `${number} ${currentMarker} ${titleText}`;
+		const cursor = isSelected ? th.fg("accent", "›") : " ";
+		const styled = isSelected
+			? th.bold(th.fg("accent", body))
+			: isCurrent
+				? th.fg("success", body)
+				: th.fg("text", body);
+		return ` ${cursor} ${styled}`;
 	}
 
 	private currentPath(): string | undefined {
@@ -763,11 +773,10 @@ export default function (pi: ExtensionAPI) {
 					{
 						overlay: true,
 						overlayOptions: {
-							anchor: "center",
-							width: "48%",
-							minWidth: 52,
-							maxHeight: "85%",
-							margin: { left: 2, right: 2, top: 2, bottom: 2 },
+							anchor: "bottom-center",
+							width: OVERLAY_WIDTH,
+							maxHeight: "100%",
+							margin: { left: 0, right: 0, bottom: 0 },
 						},
 						onHandle: (handle) => {
 							queueMicrotask(() => handle.focus());
