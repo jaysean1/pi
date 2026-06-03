@@ -6,18 +6,18 @@ import { truncateToWidth, visibleWidth, type Component, type TUI } from "@earend
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-// --- Wordmark font (7 rows, '#' = on). Bold 2px strokes. Edit WORD to change the text. ---
-const GLYPHS: Record<string, string[]> = {
-	J: ["######", "######", "....##", "....##", "....##", "##..##", ".####."],
-	A: [".####.", "######", "##..##", "##..##", "######", "##..##", "##..##"],
-	Y: ["##..##", "##..##", ".####.", "..##..", "..##..", "..##..", "..##.."],
-	S: [".#####", "######", "##....", ".####.", "....##", "######", "#####."],
-	E: ["######", "######", "##....", "#####.", "##....", "######", "######"],
-	N: ["##...##", "###..##", "####.##", "##.####", "##..###", "##...##", "##...##"],
-};
-const WORD = "JAYSEAN";
-const GLYPH_H = 7;
-const LETTER_GAP = 2; // columns between letters (room for the 3D extrude)
+// --- Wordmark banner (figlet "ANSI Shadow"). '█' = lit face, box-drawing chars = built-in 3D shadow. ---
+const WORD = "JAYSEAN"; // kept for the narrow-terminal fallback label
+const FACE_CH = "█"; // full-block character that forms the bright letter face
+const BANNER: string[] = [
+	"     ██╗ █████╗ ██╗   ██╗███████╗███████╗ █████╗ ███╗   ██╗",
+	"     ██║██╔══██╗╚██╗ ██╔╝██╔════╝██╔════╝██╔══██╗████╗  ██║",
+	"     ██║███████║ ╚████╔╝ ███████╗█████╗  ███████║██╔██╗ ██║",
+	"██   ██║██╔══██║  ╚██╔╝  ╚════██║██╔══╝  ██╔══██║██║╚██╗██║",
+	"╚█████╔╝██║  ██║   ██║   ███████║███████╗██║  ██║██║ ╚████║",
+	" ╚════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝",
+];
+const TAGLINE = "· your terminal AI agent ·";
 
 type RGB = [number, number, number];
 
@@ -40,12 +40,12 @@ const CYCLE_SPEED = 0.22; // degrees of hue rotation per millisecond
 const RAINBOW_SAT = 0.85;
 const RAINBOW_LIGHT = 0.62;
 
-// --- Timing ---
-const BAND = 6; // width of the reveal light sweep, in diagonal units
-const SWEEP_MS = 2600; // phase 1: rainbow flows in as letters reveal
-const SETTLE_MS = 850; // phase 2: rainbow cools into red, then freezes
+// --- Timing (shortened: ~1.6s total, was ~3.45s) ---
+const BAND = 7; // width of the reveal light sweep, in diagonal units
+const SWEEP_MS = 1150; // phase 1: rainbow flows in as letters reveal
+const SETTLE_MS = 450; // phase 2: rainbow cools into red, then freezes
 const TOTAL_MS = SWEEP_MS + SETTLE_MS;
-const FRAME_MS = 45; // ~22fps while animating
+const FRAME_MS = 40; // ~25fps while animating
 
 // --- Recent-work summary ---
 const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and summary.
@@ -215,30 +215,24 @@ async function summariseSession(path: string, mtimeMs: number): Promise<RecentIt
 	return { topic, action, time: relTime(Date.now() - mtimeMs) };
 }
 
-// Build the composed glyph buffer once at module load.
+// Build the banner buffer once at module load.
+// Each cell carries both a colour class (type) and the literal glyph character:
+//   0 = empty, 1 = shadow (box-drawing 3D edge), 2 = face (full block).
 function buildArt() {
-	const rows: string[] = [];
-	for (let r = 0; r < GLYPH_H; r++) {
-		let line = "";
-		for (let i = 0; i < WORD.length; i++) {
-			const glyph = GLYPHS[WORD[i]!] ?? GLYPHS.A!;
-			line += glyph[r]!.replace(/\./g, " ");
-			if (i < WORD.length - 1) line += " ".repeat(LETTER_GAP);
-		}
-		rows.push(line);
-	}
-	const cols = rows[0]!.length;
-	const h = GLYPH_H + 1; // extra row for the bottom extrude
-	const w = cols + 1; // extra col on the LEFT for the extrude
-	// 0 = empty, 1 = shadow (extrude), 2 = face.
-	// The 3D extrude is offset down + left: the face sits shifted one column right
-	// (c + 1) and the shadow drops down one row at the original column (c).
+	const rows = BANNER.map((line) => [...line]); // split into code points (box chars are multi-byte)
+	const h = rows.length;
+	const w = Math.max(...rows.map((r) => r.length));
+	const cols = w;
 	const type: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
-	for (let r = 0; r < GLYPH_H; r++)
-		for (let c = 0; c < cols; c++)
-			if (rows[r]![c] === "#" && type[r + 1]![c] === 0) type[r + 1]![c] = 1;
-	for (let r = 0; r < GLYPH_H; r++)
-		for (let c = 0; c < cols; c++) if (rows[r]![c] === "#") type[r]![c + 1] = 2;
+	const chars: string[][] = Array.from({ length: h }, () => new Array(w).fill(" "));
+	for (let r = 0; r < h; r++)
+		for (let c = 0; c < w; c++) {
+			const ch = rows[r]![c] ?? " ";
+			chars[r]![c] = ch;
+			if (ch === " " || ch === "") type[r]![c] = 0;
+			else if (ch === FACE_CH) type[r]![c] = 2; // bright letter face
+			else type[r]![c] = 1; // box-drawing 3D shadow edge
+		}
 
 	let dMin = Infinity;
 	let dMax = -Infinity;
@@ -249,7 +243,7 @@ function buildArt() {
 				if (d < dMin) dMin = d;
 				if (d > dMax) dMax = d;
 			}
-	return { type, cols, h, w, dMin, dMax };
+	return { type, chars, cols, h, w, dMin, dMax };
 }
 
 const ART = buildArt();
@@ -410,9 +404,19 @@ class IntroHeader implements Component {
 
 	private cellStyle(t: number, r: number, c: number, elapsed: number): { ansi: string; ch: string } {
 		const face = this.faceColor(r, c, elapsed);
+		const ch = ART.chars[r]![c]!;
 		return t === 1
-			? { ansi: this.emit(mul(face, SHADOW_MUL)), ch: "▓" }
-			: { ansi: this.emit(face), ch: "█" };
+			? { ansi: this.emit(mul(face, SHADOW_MUL)), ch } // dim box-drawing 3D shadow
+			: { ansi: this.emit(face), ch }; // bright full-block face
+	}
+
+	/** Centered subtitle, aligned under the banner span. */
+	private taglineLine(width: number): string {
+		const padW = visibleWidth(this.leftPad(width, ART.w));
+		const span = Math.min(ART.w, Math.max(0, width - padW));
+		const text = truncWidth(TAGLINE, span);
+		const lead = padW + Math.max(0, Math.floor((span - visibleWidth(text)) / 2));
+		return " ".repeat(lead) + this.emit(DIM_RGB) + text + RESET;
 	}
 
 	private leftPad(width: number, reservedWidth = 1): string {
@@ -502,6 +506,7 @@ class IntroHeader implements Component {
 			if (last) outLine += RESET;
 			lines.push(this.leftPad(width, ART.w) + outLine);
 		}
+		lines.push(this.taglineLine(width));
 		lines.push(...this.summaryLines(width));
 		return lines;
 	}

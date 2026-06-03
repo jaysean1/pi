@@ -388,31 +388,28 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		return lines;
 	}
 
-	// Render the "New session" entry as a small bordered button so it reads as a
-	// distinct, clickable-looking control rather than a plain list row. The box
-	// border is drawn in the accent color when selected and the muted border color
-	// otherwise; a "›" cursor sits to the left of the middle row.
+	// Render the "New session" entry as a compact single-line bracket button so it
+	// reads as a distinct, clickable-looking control rather than a plain list row
+	// without consuming three vertical lines. The brackets are drawn in the accent
+	// color when selected and the muted border color otherwise; a "›" cursor sits
+	// to the left.
 	private renderNewSessionRow(width: number): string[] {
 		const th = this.theme;
 		const isSelected = this.selectedIndex === 0;
 		const content = "+  New session";
-		// Box layout: │ <space> label <space> │, so the inner width is the label cell
-		// plus the two padding spaces. Clamp to the overlay width (minus indent +
-		// borders) so the button never overflows on narrow terminals.
-		const innerWidth = Math.min(visibleWidth(content) + 2, Math.max(3, width - 6));
-		const labelWidth = Math.max(1, innerWidth - 2);
+		// Single-line layout: " › [ label ] ". The fixed prefix/suffix (cursor +
+		// brackets + padding) take 8 columns, so clamp the label to the remaining
+		// width so the button never overflows on narrow terminals.
+		const labelWidth = Math.max(1, width - 8);
 		const label = truncateToWidth(content, labelWidth, "...");
-		const padCount = Math.max(0, labelWidth - visibleWidth(label));
-		const labelCell = `${label}${" ".repeat(padCount)}`;
 
 		const borderColor = isSelected ? "accent" : "border";
-		const top = th.fg(borderColor, `╭${"─".repeat(innerWidth)}╮`);
-		const bottom = th.fg(borderColor, `╰${"─".repeat(innerWidth)}╯`);
-		const side = th.fg(borderColor, "│");
-		const labelStyled = isSelected ? th.bold(th.fg("accent", labelCell)) : th.fg("accent", labelCell);
+		const bracketL = th.fg(borderColor, "[");
+		const bracketR = th.fg(borderColor, "]");
+		const labelStyled = isSelected ? th.bold(th.fg("accent", label)) : th.fg("accent", label);
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
 
-		return [`    ${top}`, ` ${cursor}  ${side} ${labelStyled} ${side}`, `    ${bottom}`];
+		return [` ${cursor}  ${bracketL} ${labelStyled} ${bracketR}`];
 	}
 
 	private renderSessionItem(item: SessionItem, index: number, width: number): string {

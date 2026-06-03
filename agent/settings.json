@@ -3,20 +3,20 @@
   "defaultProvider": "anthropic",
   "defaultThinkingLevel": "xhigh",
   "lastChangelogVersion": "0.78.0",
-  "quietStartup": true,
   "packages": [
     "npm:pi-web-access",
-    "/Users/jayseanqian/.vibe-island/pi-extension",
     "extensions/rpiv-mono/packages/rpiv-ask-user-question",
     "extensions/rpiv-mono/packages/rpiv-todo",
-    "extensions/anthropic-subscription-prompt-cleaner"
+    "extensions/anthropic-subscription-prompt-cleaner",
+    "/Users/jayseanqian/.vibe-island/pi-extension"
   ],
+  "quietStartup": true,
+  "terminal": {
+    "showImages": false
+  },
   "theme": "light",
   "treeFilterMode": "user-only",
   "warnings": {
     "anthropicExtraUsage": false
-  },
-  "terminal": {
-    "showImages": false
   }
 }
