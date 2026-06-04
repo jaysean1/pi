@@ -3,8 +3,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
-import { open, readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { createRecentWorkSection } from "../jaysean-recent-work/index.ts";
 
 // --- Wordmark banner (figlet "ANSI Shadow"). '█' = lit face, box-drawing chars = built-in 3D shadow. ---
 const WORD = "JAYSEAN"; // kept for the narrow-terminal fallback label
@@ -27,11 +26,8 @@ const RED_END: RGB = [217, 119, 87]; // Claude burnt orange #d97757
 const HIGHLIGHT: RGB = [250, 250, 255]; // white sweep crest during reveal
 const SHADOW_MUL = 0.24; // how dark the 3D extrude is
 
-// --- Summary block palette (tuned for a light / cream background) ---
-const FOCUS_RGB: RGB = [200, 96, 64]; // memory.md "now" line (Claude coral)
-const BULLET_RGB: RGB = [168, 96, 78]; // muted coral bullets / labels
-const TOPIC_RGB: RGB = [92, 84, 80]; // session topic text (dark warm grey, readable)
-const DIM_RGB: RGB = [105, 97, 92]; // timestamps / hints
+// --- Recent section palette (tuned for a light / cream background) ---
+const DIM_RGB: RGB = [105, 97, 92]; // tagline / fallback hints
 
 // --- Animated rainbow while the intro plays (ultrathink-style shimmer). ---
 const HUE_SPREAD = 320; // degrees of rainbow spread across the wordmark
@@ -47,11 +43,8 @@ const SETTLE_MS = 450; // phase 2: rainbow cools into red, then freezes
 const TOTAL_MS = SWEEP_MS + SETTLE_MS;
 const FRAME_MS = 40; // ~25fps while animating
 
-// --- Recent-work summary ---
-const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and summary.
-const MAX_ITEMS = 5; // recent sessions to list
-const HEAD_BYTES = 200_000; // bounded read from the top of a session file
-const TAIL_BYTES = 200_000; // bounded read from the bottom of a session file
+// --- Recent-work section ---
+const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and recent section.
 const OVERFLOW_MARKER = "...";
 
 const RESET = "\x1b[0m";
@@ -103,118 +96,6 @@ function truncWidth(s: string, max: number): string {
 	return truncateToWidth(s, max, OVERFLOW_MARKER);
 }
 
-// --- Session-record helpers ---
-interface RecentItem {
-	topic: string;
-	action: string;
-	time: string;
-}
-
-function relTime(deltaMs: number): string {
-	const s = deltaMs / 1000;
-	if (s < 90) return "now";
-	const m = s / 60;
-	if (m < 60) return `${Math.round(m)}m`;
-	const h = m / 60;
-	if (h < 24) return `${Math.round(h)}h`;
-	return `${Math.round(h / 24)}d`;
-}
-
-function cleanText(text: string): string {
-	return text
-		.replace(/```[\s\S]*?```/g, " ")
-		.replace(/`([^`]+)`/g, "$1")
-		.replace(/https?:\/\/\S+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-function isMeaningfulUser(text: string): boolean {
-	const t = cleanText(text);
-	if (!t) return false;
-	if (/^\/?(resume|reload|quit|new|clear|exit|sessions|intro|tree|fork|clone)(\s|$)/i.test(t)) return false;
-	if (/^(hi|hello|hey|thanks|thank you|ok|你好|嗨|谢谢|好的|可以|嗯|是的|继续)$/i.test(t)) return false;
-	return visibleWidth(t) >= 4;
-}
-
-function extractText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((part) => {
-			if (!part || typeof part !== "object") return "";
-			const block = part as { type?: string; text?: unknown };
-			return block.type === "text" && typeof block.text === "string" ? block.text : "";
-		})
-		.filter(Boolean)
-		.join(" ");
-}
-
-function firstSentence(text: string): string {
-	const t = cleanText(text);
-	const m = t.split(/(?<=[。.!?！？])\s|\n/)[0] ?? t;
-	return m.trim();
-}
-
-async function readHeadTail(path: string): Promise<{ head: string; tail: string; whole: boolean }> {
-	const fh = await open(path, "r");
-	try {
-		const { size } = await fh.stat();
-		if (size <= HEAD_BYTES + TAIL_BYTES) {
-			const buf = Buffer.alloc(size);
-			await fh.read(buf, 0, size, 0);
-			const s = buf.toString("utf8");
-			return { head: s, tail: s, whole: true };
-		}
-		const hb = Buffer.alloc(HEAD_BYTES);
-		await fh.read(hb, 0, HEAD_BYTES, 0);
-		const tb = Buffer.alloc(TAIL_BYTES);
-		await fh.read(tb, 0, TAIL_BYTES, size - TAIL_BYTES);
-		return { head: hb.toString("utf8"), tail: tb.toString("utf8"), whole: false };
-	} finally {
-		await fh.close();
-	}
-}
-
-function parseLine(line: string): { role?: string; text: string } | undefined {
-	if (!line.trim()) return undefined;
-	let entry: unknown;
-	try {
-		entry = JSON.parse(line);
-	} catch {
-		return undefined;
-	}
-	const msg = (entry as { type?: string; message?: { role?: string; content?: unknown } }).message;
-	if (!msg) return undefined;
-	return { role: msg.role, text: cleanText(extractText(msg.content)) };
-}
-
-async function summariseSession(path: string, mtimeMs: number): Promise<RecentItem | undefined> {
-	const { head, tail, whole } = await readHeadTail(path);
-
-	let topic = "";
-	for (const line of head.split("\n")) {
-		const p = parseLine(line);
-		if (p?.role === "user" && p.text && isMeaningfulUser(p.text)) {
-			topic = p.text;
-			break;
-		}
-	}
-	if (!topic) return undefined; // empty / trivial session
-
-	let action = "";
-	const tailLines = tail.split("\n");
-	for (let i = tailLines.length - 1; i >= (whole ? 0 : 1); i--) {
-		const p = parseLine(tailLines[i]!);
-		if (p?.role === "assistant" && p.text) {
-			action = firstSentence(p.text);
-			if (action) break;
-		}
-	}
-
-	return { topic, action, time: relTime(Date.now() - mtimeMs) };
-}
-
 // Build the banner buffer once at module load.
 // Each cell carries both a colour class (type) and the literal glyph character:
 //   0 = empty, 1 = shadow (box-drawing 3D edge), 2 = face (full block).
@@ -258,23 +139,16 @@ const rainbow = (c: number, r: number, ms: number): RGB =>
 class IntroHeader implements Component {
 	readonly tui: TUI;
 	private theme: Theme;
-	private ctx: ExtensionContext;
 	private start = Date.now();
 	private finished = false;
 	private timer: ReturnType<typeof setInterval> | undefined;
-	private disposed = false;
-
-	// Recent-work state (loaded asynchronously so startup is never blocked).
-	private loaded = false;
-	private focus: string | undefined;
-	private items: RecentItem[] = [];
+	private recent: (Component & { dispose?: () => void }) | undefined;
 
 	constructor(tui: TUI, theme: Theme, ctx: ExtensionContext) {
 		this.tui = tui;
 		this.theme = theme;
-		this.ctx = ctx;
 		this.startAnim();
-		void this.loadRecent();
+		this.recent = createRecentWorkSection(ctx, tui, theme, { indent: HEADER_INDENT });
 	}
 
 	private startAnim(): void {
@@ -298,73 +172,6 @@ class IntroHeader implements Component {
 		}
 	}
 
-	private async loadRecent(): Promise<void> {
-		try {
-			const [focus, items] = await Promise.all([this.loadFocus(), this.loadSessions()]);
-			if (this.disposed) return;
-			this.focus = focus;
-			this.items = items;
-		} catch {
-			// Leave the summary empty on any error.
-		}
-		this.loaded = true;
-		if (!this.disposed) this.tui.requestRender();
-	}
-
-	/** Pull the first real "active work" bullet from the workspace memory.md, if present. */
-	private async loadFocus(): Promise<string | undefined> {
-		try {
-			const text = await readFile(join(this.ctx.cwd, "memory.md"), "utf8");
-			const lines = text.split("\n");
-			let inSection = false;
-			for (const raw of lines) {
-				const line = raw.trim();
-				if (/^##\s/.test(line)) {
-					inSection = /active|work|progress|current/i.test(line);
-					continue;
-				}
-				if (!inSection) continue;
-				const m = line.match(/^[-*]\s+(.*)$/);
-				if (!m) continue;
-				const item = cleanText(m[1]!);
-				if (!item) continue;
-				if (/no .*(recorded|memory|active)|recorded yet|placeholder/i.test(item)) continue;
-				return item;
-			}
-		} catch {
-			// no memory.md or unreadable
-		}
-		return undefined;
-	}
-
-	/** List the most recent sessions for the current workspace and summarise them. */
-	private async loadSessions(): Promise<RecentItem[]> {
-		const dir = this.ctx.sessionManager.getSessionDir();
-		const current = this.ctx.sessionManager.getSessionFile();
-		const names = await readdir(dir);
-		const stated = await Promise.all(
-			names
-				.filter((n) => n.endsWith(".jsonl"))
-				.map(async (n) => {
-					const p = join(dir, n);
-					try {
-						const s = await stat(p);
-						return { p, m: s.mtimeMs };
-					} catch {
-						return undefined;
-					}
-				}),
-		);
-		const sorted = stated
-			.filter((x): x is { p: string; m: number } => Boolean(x))
-			.filter((x) => x.p !== current)
-			.sort((a, b) => b.m - a.m)
-			.slice(0, MAX_ITEMS + 2); // read a few extra; some may be empty
-
-		const summaries = await Promise.all(sorted.map((x) => summariseSession(x.p, x.m).catch(() => undefined)));
-		return summaries.filter((x): x is RecentItem => Boolean(x)).slice(0, MAX_ITEMS);
-	}
-
 	/** Replay the intro animation from the start. */
 	replay(): void {
 		this.startAnim();
@@ -372,8 +179,9 @@ class IntroHeader implements Component {
 	}
 
 	dispose(): void {
-		this.disposed = true;
 		this.stopAnim();
+		this.recent?.dispose?.();
+		this.recent = undefined;
 	}
 
 	invalidate(): void {
@@ -424,54 +232,19 @@ class IntroHeader implements Component {
 		return " ".repeat(Math.min(HEADER_INDENT, available));
 	}
 
-	/** Lines for the recent-work summary, aligned to the fixed header inset. */
-	private summaryLines(width: number): string[] {
+	/** Lines for the delegated recent-work section. */
+	private recentLines(width: number): string[] {
+		if (this.recent) return this.recent.render(width);
 		const pad = this.leftPad(width);
-		const padW = visibleWidth(pad);
-		const inner = Math.max(1, width - padW);
-		const bullet = "  • ";
-		const bulletW = visibleWidth(bullet);
-		const out: string[] = [""];
-
-		if (this.focus) {
-			const prefix = "▸ now  ";
-			const text = truncWidth(this.focus, inner - visibleWidth(prefix));
-			out.push(pad + this.emit(FOCUS_RGB) + prefix + text + RESET);
-		}
-
-		out.push(pad + this.emit(DIM_RGB) + "recent  ·  type /intro to replay" + RESET);
-
-		if (!this.loaded) {
-			out.push(pad + this.emit(DIM_RGB) + bullet + "loading recent work…" + RESET);
-			return out;
-		}
-		if (this.items.length === 0) {
-			out.push(pad + this.emit(DIM_RGB) + bullet + "(no recent sessions)" + RESET);
-			return out;
-		}
-
-		for (const item of this.items) {
-			const rt = item.time;
-			// Pad every topic to the same width so the time column lines up.
-			const avail = Math.max(0, inner - bulletW - visibleWidth(rt) - 1);
-			const mid = item.action ? `${item.topic}  →  ${item.action}` : item.topic;
-			const midT = truncWidth(mid, avail);
-			const padN = Math.max(1, avail - visibleWidth(midT) + 1);
-			out.push(
-				pad +
-					this.emit(BULLET_RGB) +
-					bullet +
-					RESET +
-					this.emit(TOPIC_RGB) +
-					midT +
-					RESET +
-					" ".repeat(padN) +
-					this.emit(DIM_RGB) +
-					rt +
-					RESET,
-			);
-		}
-		return out.map((line) => truncateToWidth(line, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET));
+		return [
+			"",
+			truncateToWidth(pad + this.emit(DIM_RGB) + "recent" + RESET, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
+			truncateToWidth(
+				pad + this.emit(DIM_RGB) + "  • loading recent work…" + RESET,
+				width,
+				this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET,
+			),
+		];
 	}
 
 	render(width: number): string[] {
@@ -507,7 +280,7 @@ class IntroHeader implements Component {
 			lines.push(this.leftPad(width, ART.w) + outLine);
 		}
 		lines.push(this.taglineLine(width));
-		lines.push(...this.summaryLines(width));
+		lines.push(...this.recentLines(width));
 		return lines;
 	}
 }

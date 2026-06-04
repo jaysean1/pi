@@ -14,16 +14,14 @@ one-shot intro in three phases:
 
 Truecolor terminals get 24-bit colour; 256-colour terminals get a cube fallback.
 
-Below the wordmark it shows a **recent-work summary** for the current workspace, aligned to the same inset:
+Below the wordmark it delegates the **recent-work summary** to the sibling
+`jaysean-recent-work` extension. That section is aligned to the same inset and
+shows the last few sessions for this workspace with relative time (`now` / `34m`
+/ `2h` / `2d`). The current session is excluded.
 
-- `▸ now` — the first "active work" bullet from the workspace `memory.md`
-  (`## Active Projects and Work`), shown only when a real entry exists.
-- `recent` — the last few sessions for this workspace, each summarised
-  heuristically as `first request  →  last action` with a relative time
-  (`now` / `34m` / `2h` / `2d`). The current session is excluded.
-
-Sessions are read from `~/.pi/agent/sessions/<cwd>/*.jsonl` with bounded
-head/tail reads, loaded **asynchronously** so startup is never blocked.
+`jaysean-recent-work` is responsible for scanning sessions, reusing
+`session-recap/line` summaries, background LLM summarisation, and heuristic
+fallbacks. This keeps the header focused on rendering the intro shell.
 
 ## Hiding Pi's built-in startup listing
 
@@ -47,23 +45,23 @@ This folder lives in `~/.pi/agent/extensions/`, so Pi auto-discovers it. No
 ## Commands
 
 - `/intro` — replay the intro animation in the current session.
+- `/recent` — refresh the delegated recent-work section.
 
 ## Customise
 
 Open `index.ts` and edit the constants near the top:
 
-- `WORD` — the text to render. Add any new letters you need to `GLYPHS`
-  (each glyph is 7 rows of `#`/`.` with bold ~2px strokes; rows within a glyph
-  must all be the same width). The 3D extrude is offset **down + left**.
+- `WORD` — the narrow-terminal fallback text.
 - `RED_START` / `RED_END` — the frozen red gradient (RGB). `HIGHLIGHT` is the
-  white sweep crest; `SUBTITLE_RGB` tints the tagline.
+  white sweep crest.
 - `HUE_SPREAD` / `ROW_HUE` / `CYCLE_SPEED` / `RAINBOW_SAT` / `RAINBOW_LIGHT` —
   the animated rainbow during the reveal.
 - `SWEEP_MS` — reveal duration; `SETTLE_MS` — rainbow→red morph duration.
 - `FRAME_MS` — frame interval while animating (lower = smoother, more CPU).
-- `HEADER_INDENT` — left inset for both the wordmark and summary.
-- `MAX_ITEMS` — how many recent sessions to list.
-- `FOCUS_RGB` / `BULLET_RGB` / `TOPIC_RGB` / `DIM_RGB` — summary-block colours.
+- `HEADER_INDENT` — left inset for both the wordmark and delegated recent section.
+
+Configure recent-session count, LLM model, and cache behavior in
+`jaysean-recent-work` via `recentWork` settings.
 
 The animation is one-shot by design: the `setInterval` timer is cleared once the
 sweep finishes, so it does not burn CPU while you work. The timer is also
