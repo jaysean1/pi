@@ -12,6 +12,7 @@ import {
 	TRACKED_TOOLS,
 } from "./src/core/constants.ts";
 import type { ChangeEntry, ReviewOpenMode } from "./src/core/types.ts";
+import { shouldTrackBashCommand } from "./src/core/bash-command.ts";
 import { buildFileDiffs } from "./src/core/diff-engine.ts";
 import {
 	clearPersistedChanges,
@@ -225,10 +226,11 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	});
 
 	// Capture original content before a write/edit runs, then latest content after
-	// it succeeds. For bash, snapshot the cwd tree before/after execution so files
-	// created or changed by shell commands also enter the review set.
+	// it succeeds. For bash, snapshot the cwd tree before/after execution only for
+	// write-like or ambiguous commands; clearly read-only commands are skipped.
 	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName === BASH_TOOL) {
+			if (!shouldTrackBashCommand(event.input)) return;
 			const baseline = snapshotFileTree(ctx.cwd);
 			if (baseline.truncated) warnBashScanTruncated(ctx);
 			bashBaselines.set(event.toolCallId, baseline);

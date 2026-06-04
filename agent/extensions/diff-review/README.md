@@ -5,7 +5,8 @@ Review files Pi created or modified during a session, or browse the current proj
 ## What it does
 
 - Tracks every file touched by the `write` and `edit` tools across the current session.
-- Tracks files created, modified, or deleted under the session `cwd` by the `bash` tool using before/after project scans.
+- Tracks files created, modified, or deleted under the session `cwd` by write-like or ambiguous `bash` commands using before/after project scans.
+- Skips clearly read-only `bash` commands such as `pwd`, `ls`, `find`, `rg`, and `git diff` to avoid unnecessary scans.
 - Keeps the original content and latest content for each tracked file.
 - Persists the tracked review set per Pi session, so it survives session switches, `/reload`, and Pi restarts.
 - Opens a full-screen overlay with two tabs: `Diff` and `Files`.
@@ -40,6 +41,7 @@ diff-review/
 
 Use this split when changing behaviour:
 
+- Change bash command classification in `src/core/bash-command.ts`.
 - Change tracking or saved review state in `src/core/file-state.ts`.
 - Change diff rows or stats in `src/core/diff-engine.ts`; change wrapping helpers in `src/core/browse-tree.ts`.
 - Change the footer `review` or `files` entry in `src/ui/footer.ts`.
@@ -120,8 +122,9 @@ pane shows a tree. The right pane previews the selected directory or file.
 
 Changes are captured from the `tool_call` (before) and `tool_result` (after)
 hooks. For `write` and `edit`, the extension snapshots the addressed path. For
-`bash`, it snapshots the current project tree before and after the command. The
-review set is saved per Pi session under:
+`bash`, it first classifies the command: clearly read-only commands are skipped,
+while write-like or ambiguous commands snapshot the current project tree before
+and after execution. The review set is saved per Pi session under:
 
 ```text
 ~/.pi/agent/state/diff-review/
@@ -143,7 +146,8 @@ Use `/review status` to confirm tracking is working after an edit.
 
 - Tracking is **session-cumulative**: it accumulates all unreviewed changes.
 - Tracking is global to the session for `write` and `edit`; files edited outside the current directory are included in `Diff`.
-- `bash` tracking is project-scoped: it scans regular files under the session `cwd`, skipping common heavy folders.
+- `bash` tracking is project-scoped: write-like or ambiguous commands scan regular files under the session `cwd`, skipping common heavy folders.
+- Clearly read-only `bash` commands are not scanned, which avoids warnings and startup-scale scans for commands such as `pwd`, `ls`, `find`, `rg`, and `git status`.
 - Bash scans are capped at 2,500 files and 16 MB of captured text per scan; if a cap is hit, some files may show a note or be omitted.
 - New files show as all additions. Files reverted to their original content are hidden.
 - Binary files, skipped files, and files larger than 512 KB are listed with a note instead of a diff or preview.
