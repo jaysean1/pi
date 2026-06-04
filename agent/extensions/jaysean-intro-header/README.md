@@ -15,9 +15,10 @@ one-shot intro in three phases:
 Truecolor terminals get 24-bit colour; 256-colour terminals get a cube fallback.
 
 Below the wordmark it delegates the **recent-work summary** to the sibling
-`jaysean-recent-work` extension. That section is aligned to the same inset and
-shows the last few sessions for this workspace with relative time (`now` / `34m`
-/ `2h` / `2d`). The current session is excluded.
+`jaysean-recent-work` extension. The `recent` heading and old nested list indent
+are hidden so only flush-left list items are shown. The section shows the last
+few sessions for this workspace with relative time (`now` / `34m` / `2h` /
+`2d`). The current session is excluded.
 
 `jaysean-recent-work` is responsible for scanning sessions, reusing
 `session-recap/line` summaries, background LLM summarisation, and heuristic

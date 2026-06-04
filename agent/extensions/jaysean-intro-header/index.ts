@@ -45,6 +45,7 @@ const FRAME_MS = 40; // ~25fps while animating
 
 // --- Recent-work section ---
 const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and recent section.
+const RECENT_LIST_INDENT_TRIM = HEADER_INDENT + 2; // remove old title/list nesting before bullets.
 const OVERFLOW_MARKER = "...";
 
 const RESET = "\x1b[0m";
@@ -94,6 +95,31 @@ function hslToRgb(h: number, s: number, l: number): RGB {
 
 function truncWidth(s: string, max: number): string {
 	return truncateToWidth(s, max, OVERFLOW_MARKER);
+}
+
+function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function trimLeadingVisibleSpaces(s: string): string {
+	let i = 0;
+	let out = "";
+	while (i < s.length) {
+		if (s[i] === "\x1b") {
+			const match = /^\x1b\[[0-?]*[ -/]*[@-~]/.exec(s.slice(i));
+			if (match) {
+				out += match[0];
+				i += match[0].length;
+				continue;
+			}
+		}
+		if (s[i] === " ") {
+			i++;
+			continue;
+		}
+		return out + s.slice(i);
+	}
+	return out;
 }
 
 // Build the banner buffer once at module load.
@@ -232,31 +258,9 @@ class IntroHeader implements Component {
 		return " ".repeat(Math.min(HEADER_INDENT, available));
 	}
 
-	/** Lines for the delegated recent-work section. */
-	private recentLines(width: number): string[] {
-		if (this.recent) return this.recent.render(width);
-		const pad = this.leftPad(width);
-		return [
-			"",
-			truncateToWidth(pad + this.emit(DIM_RGB) + "recent" + RESET, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
-			truncateToWidth(
-				pad + this.emit(DIM_RGB) + "  • loading recent work…" + RESET,
-				width,
-				this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET,
-			),
-		];
-	}
-
-	render(width: number): string[] {
-		// Narrow-terminal fallback: simple inset wordmark in the freeze colour.
-		if (width < ART.w + HEADER_INDENT) {
-			const pad = this.leftPad(width);
-			const plain = truncateToWidth(WORD.toLowerCase(), Math.max(0, width - visibleWidth(pad)), "");
-			return ["", pad + this.emit(RED_END) + plain + RESET, ""];
-		}
-
-		const elapsed = this.finished ? TOTAL_MS : Date.now() - this.start;
-		const lines: string[] = [""];
+	/** Animated wordmark plus tagline, with no leading blank line. */
+	private bannerLines(width: number, elapsed: number): string[] {
+		const lines: string[] = [];
 		for (let r = 0; r < ART.h; r++) {
 			let outLine = "";
 			let last = "";
@@ -280,8 +284,48 @@ class IntroHeader implements Component {
 			lines.push(this.leftPad(width, ART.w) + outLine);
 		}
 		lines.push(this.taglineLine(width));
-		lines.push(...this.recentLines(width));
 		return lines;
+	}
+
+	/** Lines for the delegated recent-work section. */
+	private recentLines(width: number): string[] {
+		if (this.recent) return this.recent.render(width);
+		const pad = this.leftPad(width);
+		return [
+			"",
+			truncateToWidth(pad + this.emit(DIM_RGB) + "recent" + RESET, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
+			truncateToWidth(
+				pad + this.emit(DIM_RGB) + "  • loading recent work…" + RESET,
+				width,
+				this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET,
+			),
+		];
+	}
+
+	/** Recent list only: drop the stacked-layout spacer, heading, and old nested indent. */
+	private recentListLines(width: number): string[] {
+		if (width <= 0) return [];
+		const lines = this.recentLines(width + RECENT_LIST_INDENT_TRIM).filter((line) => line !== "");
+		const list = stripAnsi(lines[0] ?? "").trim().toLowerCase() === "recent" ? lines.slice(1) : lines;
+		return list.map((line) =>
+			truncateToWidth(trimLeadingVisibleSpaces(line), width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
+		);
+	}
+
+	private renderStacked(width: number, elapsed: number): string[] {
+		return ["", ...this.bannerLines(width, elapsed), "", ...this.recentListLines(width)];
+	}
+
+	render(width: number): string[] {
+		// Narrow-terminal fallback: simple inset wordmark in the freeze colour.
+		if (width < ART.w + HEADER_INDENT) {
+			const pad = this.leftPad(width);
+			const plain = truncateToWidth(WORD.toLowerCase(), Math.max(0, width - visibleWidth(pad)), "");
+			return ["", pad + this.emit(RED_END) + plain + RESET, ""];
+		}
+
+		const elapsed = this.finished ? TOTAL_MS : Date.now() - this.start;
+		return this.renderStacked(width, elapsed);
 	}
 }
 
