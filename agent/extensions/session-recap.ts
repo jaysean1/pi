@@ -1,7 +1,7 @@
 /**
  * session-recap — Claude-Code-style 会话 recap，空闲一段时间后用便宜模型总结本次会话。
  *
- * 触发：agent_end 后启动空闲计时器（默认 45s）。计时到点且仍空闲、且自上次 recap
+ * 触发：agent_end 后启动空闲计时器（默认 20s）。计时到点且仍空闲、且自上次 recap
  *       以来有新内容时，调用便宜模型生成一句话 recap。
  * 展示：作为自定义「内联消息」渲染在对话流底部——紧跟在 working-timer 的
  *       「✻ Worked for …」之后、音乐播放器 widget 之上。消息 content 留空、recap 文本
@@ -13,7 +13,7 @@
  *     "sessionRecap": {
  *       "enabled": true,
  *       "model": "openai-codex/gpt-5.4-mini",
- *       "idleDelayMs": 45000,
+ *       "idleDelayMs": 20000,
  *       "maxChars": 140,
  *       "contextChars": 8000,
  *       "language": "auto"          // "auto" = 跟随对话语言；也可填 "中文" / "English"
@@ -35,7 +35,7 @@ import type {
 	MessageRenderer,
 } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai";
-import { Text } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Types (defensive, version-tolerant)
@@ -82,14 +82,96 @@ interface BranchEntry {
 // customType for the inline recap message. It renders in the conversation flow,
 // right below working-timer's "✻ Worked for …" message and above the music widget.
 const MSG_TYPE = "session-recap/line";
+const RECAP_PREFIX_TEXT = "※ recap: ";
+
+function graphemes(text: string): string[] {
+	const Segmenter = (Intl as any).Segmenter;
+	if (typeof Segmenter === "function") {
+		return Array.from(
+			new Segmenter(undefined, { granularity: "grapheme" }).segment(text),
+			(part: any) => part.segment as string,
+		);
+	}
+	return Array.from(text);
+}
+
+/**
+ * Text's built-in word wrapper keeps a long path/URL token intact. For a short
+ * recap that often leaves dozens of unused columns and looks like the line is
+ * wrapping before the terminal edge. Wrap by display cells instead so the recap
+ * uses the actual render(width) supplied by the TUI.
+ */
+function hardWrapPlainText(text: string, firstWidth: number, nextWidth: number): string[] {
+	const lines: string[] = [];
+	let current = "";
+	let currentWidth = 0;
+	let limit = Math.max(1, firstWidth);
+
+	const flush = (): void => {
+		lines.push(current.trimEnd());
+		current = "";
+		currentWidth = 0;
+		limit = Math.max(1, nextWidth);
+	};
+
+	for (const segment of graphemes(text)) {
+		if (segment === "\n") {
+			flush();
+			continue;
+		}
+		if (currentWidth === 0 && segment === " ") continue;
+
+		const segmentWidth = visibleWidth(segment);
+		if (currentWidth > 0 && currentWidth + segmentWidth > limit) {
+			flush();
+			if (segment === " ") continue;
+		}
+
+		// Extremely narrow terminals can make a wide grapheme impossible to fit.
+		// Clip rather than returning a line wider than render(width)'s contract.
+		if (currentWidth === 0 && segmentWidth > limit) {
+			const clipped = truncateToWidth(segment, limit, "");
+			if (clipped) {
+				current = clipped;
+				currentWidth = visibleWidth(clipped);
+				flush();
+			}
+			continue;
+		}
+
+		current += segment;
+		currentWidth += segmentWidth;
+	}
+
+	if (current || lines.length === 0) lines.push(current.trimEnd());
+	return lines;
+}
 
 const renderRecapMessage: MessageRenderer<RecapDetails> = (message, _options, theme) => {
-	const recap = message.details?.recap ?? "";
-	const content =
-		theme.fg("dim", "※ ") +
-		theme.fg("muted", theme.bold("recap: ")) +
-		theme.fg("muted", theme.italic(recap));
-	return new Text(content, 0, 0);
+	const recap = (message.details?.recap ?? "").trim();
+	const prefix = theme.fg("dim", "※ ") + theme.fg("muted", theme.bold("recap: "));
+	const prefixWidth = visibleWidth(RECAP_PREFIX_TEXT);
+	const styleRecap = (text: string): string => theme.fg("muted", theme.italic(text));
+
+	return {
+		invalidate(): void {},
+		render(width: number): string[] {
+			const safeWidth = Math.max(1, Math.floor(width));
+			if (safeWidth <= prefixWidth) {
+				return [truncateToWidth(prefix, safeWidth, "")];
+			}
+
+			const recapLines = hardWrapPlainText(recap, safeWidth - prefixWidth, safeWidth);
+			const lines = [prefix + styleRecap(recapLines[0] ?? "")];
+			for (const line of recapLines.slice(1)) {
+				lines.push(styleRecap(line));
+			}
+
+			return lines.map((line) =>
+				visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, "") : line,
+			);
+		},
+	};
 };
 
 // ---------------------------------------------------------------------------
@@ -101,7 +183,7 @@ const SETTINGS_KEY = "sessionRecap";
 const DEFAULTS: RecapConfig = {
 	enabled: true,
 	model: "openai-codex/gpt-5.4-mini",
-	idleDelayMs: 45_000,
+	idleDelayMs: 20_000,
 	maxChars: 140,
 	contextChars: 8_000,
 	language: "auto",
