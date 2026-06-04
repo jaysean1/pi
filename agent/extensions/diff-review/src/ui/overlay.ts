@@ -8,7 +8,6 @@ import {
 	BROWSE_SIDEBAR_MAX,
 	BROWSE_SIDEBAR_MIN,
 	BROWSE_SIDEBAR_RATIO,
-	DIFF_MARK_WIDTH,
 	LINE_NUM_WIDTH,
 	PANEL_HEIGHT_RATIO,
 	SIDEBAR_MAX,
@@ -20,8 +19,8 @@ import {
 	flattenBrowseTree,
 	loadBrowseChildren,
 	previewForNode,
-	wrapDiffRows,
 	wrapPreviewLines,
+	wrapUnifiedDiffRows,
 	wrapVisibleText,
 } from "../core/browse-tree.ts";
 import { displayPathFor, truncatePathLeft } from "../core/diff-engine.ts";
@@ -29,15 +28,15 @@ import type {
 	ActiveTab,
 	BrowseFocus,
 	BrowseNode,
-	Cell,
 	FileDiff,
 	FilePreview,
 	Focus,
 	ReviewCloseAction,
 	ReviewOpenMode,
+	UnifiedDiffLine,
 } from "../core/types.ts";
 import { isToggleKey } from "../platform/keys.ts";
-import { clamp, colourBlindDiff } from "./ui-utils.ts";
+import { clamp, colourBlindDiffLine } from "./ui-utils.ts";
 
 class DiffBrowseOverlay {
 	private activeTab: ActiveTab;
@@ -45,8 +44,7 @@ class DiffBrowseOverlay {
 	private selected = 0;
 	private listScroll = 0;
 	private diffScroll = 0;
-	private diffLeftWidth = 80;
-	private diffRightWidth = 80;
+	private diffWidth = 120;
 	private browseFocus: BrowseFocus = "tree";
 	private browseSelected = 0;
 	private browseScroll = 0;
@@ -296,11 +294,7 @@ class DiffBrowseOverlay {
 	private maxDiffScroll(): number {
 		const file = this.currentDiff();
 		if (!file) return 0;
-		const wrapped = wrapDiffRows(
-			file.rows,
-			this.diffLeftWidth,
-			this.diffRightWidth,
-		);
+		const wrapped = wrapUnifiedDiffRows(file.rows, this.diffWidth);
 		return Math.max(0, wrapped.length - this.bodyRows());
 	}
 
@@ -466,26 +460,18 @@ class DiffBrowseOverlay {
 		return th.fg("text", line);
 	}
 
-	private renderDiffCell(cell: Cell, width: number): string {
+	private renderUnifiedDiffLine(line: UnifiedDiffLine, width: number): string {
 		const th = this.theme;
-		if (cell.type === "none" || cell.text === undefined)
-			return " ".repeat(width);
-		const marker =
-			cell.num === undefined
-				? "  "
-				: cell.type === "del"
-					? "D-"
-					: cell.type === "add"
-						? "A+"
-						: "  ";
-		const num = String(cell.num ?? "").padStart(LINE_NUM_WIDTH, " ");
-		const textW = Math.max(0, width - LINE_NUM_WIDTH - DIFF_MARK_WIDTH - 3);
+		const oldNum = String(line.oldNum ?? "").padStart(LINE_NUM_WIDTH, " ");
+		const newNum = String(line.newNum ?? "").padStart(LINE_NUM_WIDTH, " ");
+		const marker = line.type === "add" ? "+" : line.type === "del" ? "-" : " ";
+		const textW = Math.max(0, width - LINE_NUM_WIDTH * 2 - 4);
 		const raw = this.padTo(
-			`${num} ${marker} ${this.padTo(cell.text, textW)}`,
+			`${oldNum} ${newNum} ${marker} ${this.padTo(line.text, textW)}`,
 			width,
 		);
-		if (cell.type === "del") return colourBlindDiff(th, "del", raw);
-		if (cell.type === "add") return colourBlindDiff(th, "add", raw);
+		if (line.type === "del") return colourBlindDiffLine(th, "del", raw);
+		if (line.type === "add") return colourBlindDiffLine(th, "add", raw);
 		return th.fg("toolDiffContext", raw);
 	}
 
@@ -572,31 +558,28 @@ class DiffBrowseOverlay {
 			SIDEBAR_MAX,
 		);
 		const diffTotalW = innerW - 1 - sidebarW;
-		const diffLeftW = Math.floor((diffTotalW - 1) / 2);
-		const diffRightW = diffTotalW - 1 - diffLeftW;
-		this.diffLeftWidth = diffLeftW;
-		this.diffRightWidth = diffRightW;
+		this.diffWidth = diffTotalW;
 		this.diffScroll = clamp(this.diffScroll, 0, this.maxDiffScroll());
 		const sepColour = this.diffFocus === "diff" ? "borderAccent" : "border";
 		const sep = th.fg(sepColour, "│");
-		const gutter = th.fg(sepColour, "│");
 		const filesHeader =
 			this.diffFocus === "list"
 				? th.fg("accent", th.bold(this.padTo(" Files", sidebarW)))
 				: th.fg("muted", this.padTo(" Files", sidebarW));
 		const file = this.currentDiff();
-		const beforeHeaderText = file?.isNew ? " Before (empty)" : " Before";
-		const afterStats = file ? `+${file.added} -${file.removed}` : "";
-		const afterPrefix = file ? ` After · ${afterStats} · ` : " After";
-		const afterRoom = Math.max(1, diffRightW - visibleWidth(afterPrefix));
-		const afterHeaderText = file
-			? `${afterPrefix}${truncatePathLeft(file.displayPath, afterRoom)}`
-			: afterPrefix;
+		const stats = file ? `+${file.added} -${file.removed}` : "";
+		const prefix = file
+			? ` Unified diff · ${stats} · `
+			: " Unified diff";
+		const room = Math.max(1, diffTotalW - visibleWidth(prefix));
+		const diffHeaderText = file
+			? `${prefix}${truncatePathLeft(file.displayPath, room)}`
+			: prefix;
 		const headerColour = this.diffFocus === "diff" ? "accent" : "muted";
-		const diffHeader =
-			th.fg(headerColour, this.padTo(beforeHeaderText, diffLeftW)) +
-			gutter +
-			th.fg(headerColour, this.padTo(afterHeaderText, diffRightW));
+		const diffHeader = th.fg(
+			headerColour,
+			this.padTo(diffHeaderText, diffTotalW),
+		);
 		lines.push(
 			th.fg("border", "│") +
 				filesHeader +
@@ -606,8 +589,9 @@ class DiffBrowseOverlay {
 		);
 
 		const note = file?.note;
-		const wrappedRows =
-			file && !note ? wrapDiffRows(file.rows, diffLeftW, diffRightW) : [];
+		const wrappedRows = file && !note
+			? wrapUnifiedDiffRows(file.rows, diffTotalW)
+			: [];
 		const noteRow = note ? Math.floor(body / 2) : -1;
 		for (let r = 0; r < body; r++) {
 			const sidebarCell = this.renderDiffSidebarCell(
@@ -630,9 +614,7 @@ class DiffBrowseOverlay {
 			} else {
 				const row = wrappedRows[this.diffScroll + r];
 				diffPart = row
-					? this.renderDiffCell(row.left, diffLeftW) +
-						gutter +
-						this.renderDiffCell(row.right, diffRightW)
+					? this.renderUnifiedDiffLine(row, diffTotalW)
 					: " ".repeat(diffTotalW);
 			}
 			lines.push(

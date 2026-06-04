@@ -20,12 +20,21 @@ export function colourBlindDiff(
 	text: string,
 ): string {
 	// Okabe-Ito colour-blind-safe pair for light terminals:
-	// addition = blue, deletion = vermillion/orange. The A+/D- tags avoid relying on colour alone.
+	// addition = blue, deletion = vermillion/orange. The +/- markers avoid relying on colour alone.
 	const ansi =
 		type === "add"
 			? ansiFg(theme, "\x1b[38;2;0;114;178m", 25)
 		: ansiFg(theme, "\x1b[38;2;213;94;0m", 166);
 	return `${ansi}${theme.bold(text)}\x1b[39m`;
+}
+
+export function colourBlindDiffLine(
+	theme: Theme,
+	type: "add" | "del",
+	text: string,
+): string {
+	const bg = type === "add" ? "toolSuccessBg" : "toolErrorBg";
+	return theme.bg(bg, colourBlindDiff(theme, type, text));
 }
 
 export function actionBlue(theme: Theme, text: string): string {

@@ -101,6 +101,14 @@ export function buildDiff(
 			note: "File too large — diff not shown.",
 		};
 	}
+	if (before.kind === "skipped" || after.kind === "skipped") {
+		return {
+			rows: [],
+			added: 0,
+			removed: 0,
+			note: "File not captured — diff not shown.",
+		};
+	}
 
 	const a = before.kind === "text" ? splitLines(before.text ?? "") : [];
 	const b = after.kind === "text" ? splitLines(after.text ?? "") : [];

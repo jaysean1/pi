@@ -10,6 +10,7 @@ import {
 	LINE_NUM_WIDTH,
 	MAX_BROWSE_CHILDREN,
 	MAX_FILE_BYTES,
+	UNIFIED_DIFF_PREFIX_WIDTH,
 } from "./constants.ts";
 import { displayPathFor, expandTabs, splitLines } from "./diff-engine.ts";
 import type {
@@ -17,6 +18,7 @@ import type {
 	Cell,
 	DiffRow,
 	FilePreview,
+	UnifiedDiffLine,
 	WrappedDiffRow,
 	WrappedPreviewLine,
 } from "./types.ts";
@@ -188,6 +190,76 @@ export function wrapDiffRows(
 				right: right[i] ?? { type: "none" },
 			});
 		}
+	}
+	return wrapped;
+}
+
+function isContextRow(row: DiffRow): boolean {
+	return row.left.type === "same" && row.right.type === "same";
+}
+
+function cellToUnifiedLine(
+	type: "add" | "del",
+	cell: Cell,
+): UnifiedDiffLine | undefined {
+	if (cell.text === undefined) return undefined;
+	return type === "del"
+		? { type, oldNum: cell.num, text: cell.text }
+		: { type, newNum: cell.num, text: cell.text };
+}
+
+export function flattenUnifiedDiffRows(rows: DiffRow[]): UnifiedDiffLine[] {
+	const lines: UnifiedDiffLine[] = [];
+	let index = 0;
+	while (index < rows.length) {
+		const row = rows[index];
+		if (!row) break;
+		if (isContextRow(row)) {
+			lines.push({
+				type: "same",
+				oldNum: row.left.num,
+				newNum: row.right.num,
+				text: row.right.text ?? row.left.text ?? "",
+			});
+			index++;
+			continue;
+		}
+
+		const deletions: UnifiedDiffLine[] = [];
+		const additions: UnifiedDiffLine[] = [];
+		while (index < rows.length && !isContextRow(rows[index]!)) {
+			const changed = rows[index]!;
+			if (changed.left.type === "del") {
+				const line = cellToUnifiedLine("del", changed.left);
+				if (line) deletions.push(line);
+			}
+			if (changed.right.type === "add") {
+				const line = cellToUnifiedLine("add", changed.right);
+				if (line) additions.push(line);
+			}
+			index++;
+		}
+		lines.push(...deletions, ...additions);
+	}
+	return lines;
+}
+
+export function wrapUnifiedDiffRows(
+	rows: DiffRow[],
+	width: number,
+): UnifiedDiffLine[] {
+	const textW = Math.max(1, width - UNIFIED_DIFF_PREFIX_WIDTH);
+	const wrapped: UnifiedDiffLine[] = [];
+	for (const line of flattenUnifiedDiffRows(rows)) {
+		const parts = wrapVisibleText(expandTabs(line.text), textW);
+		parts.forEach((part, partIndex) => {
+			wrapped.push({
+				...line,
+				oldNum: partIndex === 0 ? line.oldNum : undefined,
+				newNum: partIndex === 0 ? line.newNum : undefined,
+				text: part,
+			});
+		});
 	}
 	return wrapped;
 }

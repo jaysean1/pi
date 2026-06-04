@@ -4,17 +4,25 @@
 import { createHash } from "node:crypto";
 import {
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { MAX_FILE_BYTES, PERSISTED_STATE_VERSION } from "./constants.ts";
+import {
+	BASH_SCAN_MAX_FILES,
+	BASH_SCAN_MAX_TOTAL_BYTES,
+	IGNORED_BROWSE_NAMES,
+	MAX_FILE_BYTES,
+	PERSISTED_STATE_VERSION,
+} from "./constants.ts";
 import type {
 	ChangeEntry,
 	FileSnapshot,
@@ -63,6 +71,157 @@ export function resolveInputPath(cwd: string, p: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Bash/project tree snapshots
+// ---------------------------------------------------------------------------
+
+export interface TreeFileSnapshot {
+	snapshot: FileSnapshot;
+	size: number;
+	mtimeMs: number;
+}
+
+export interface FileTreeSnapshot {
+	files: Map<string, TreeFileSnapshot>;
+	truncated: boolean;
+}
+
+interface TreeScanBudget {
+	files: number;
+	textBytes: number;
+	truncated: boolean;
+}
+
+function snapshotTreeFile(
+	absPath: string,
+	size: number,
+	budget: TreeScanBudget,
+): FileSnapshot {
+	if (size > MAX_FILE_BYTES) return { kind: "toolarge" };
+	if (budget.textBytes + size > BASH_SCAN_MAX_TOTAL_BYTES) {
+		budget.truncated = true;
+		return { kind: "skipped" };
+	}
+	try {
+		const buf = readFileSync(absPath);
+		budget.textBytes += size;
+		if (buf.includes(0)) return { kind: "binary" };
+		return { kind: "text", text: buf.toString("utf8") };
+	} catch {
+		return { kind: "absent" };
+	}
+}
+
+// Snapshot regular files below root before/after a bash tool. This is capped and
+// skips common heavy directories, so bash tracking is best-effort for very large
+// trees but captures normal project file creation/modification/deletion.
+export function snapshotFileTree(root: string): FileTreeSnapshot {
+	const files = new Map<string, TreeFileSnapshot>();
+	const budget: TreeScanBudget = { files: 0, textBytes: 0, truncated: false };
+	const rootAbs = resolve(root);
+
+	const visit = (dir: string): void => {
+		if (budget.files >= BASH_SCAN_MAX_FILES) {
+			budget.truncated = true;
+			return;
+		}
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		entries.sort((a, b) => a.name.localeCompare(b.name));
+		for (const entry of entries) {
+			if (budget.files >= BASH_SCAN_MAX_FILES) {
+				budget.truncated = true;
+				return;
+			}
+			if (IGNORED_BROWSE_NAMES.has(entry.name)) continue;
+			const absPath = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				visit(absPath);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			try {
+				const st = statSync(absPath);
+				if (!st.isFile()) continue;
+				files.set(absPath, {
+					snapshot: snapshotTreeFile(absPath, st.size, budget),
+					size: st.size,
+					mtimeMs: st.mtimeMs,
+				});
+				budget.files++;
+			} catch {
+				// File disappeared during scan; the after-scan will settle the final state.
+			}
+		}
+	};
+
+	try {
+		const st = statSync(rootAbs);
+		if (st.isFile()) {
+			files.set(rootAbs, {
+				snapshot: snapshotTreeFile(rootAbs, st.size, budget),
+				size: st.size,
+				mtimeMs: st.mtimeMs,
+			});
+		} else if (st.isDirectory()) {
+			visit(rootAbs);
+		}
+	} catch {
+		// Missing root: no bash-visible project files to track.
+	}
+
+	return { files, truncated: budget.truncated };
+}
+
+function treeFileUnchanged(
+	before: TreeFileSnapshot | undefined,
+	after: TreeFileSnapshot | undefined,
+): boolean {
+	if (!before && !after) return true;
+	if (!before || !after) return false;
+	if (before.snapshot.kind === "text" && after.snapshot.kind === "text") {
+		return before.snapshot.text === after.snapshot.text;
+	}
+	return (
+		before.snapshot.kind === after.snapshot.kind &&
+		before.size === after.size &&
+		before.mtimeMs === after.mtimeMs
+	);
+}
+
+export function mergeFileTreeChanges(
+	changes: Map<string, ChangeEntry>,
+	before: FileTreeSnapshot,
+	after: FileTreeSnapshot,
+): number {
+	let changed = 0;
+	const paths = new Set<string>([
+		...before.files.keys(),
+		...after.files.keys(),
+	]);
+	for (const absPath of paths) {
+		const beforeFile = before.files.get(absPath);
+		const afterFile = after.files.get(absPath);
+		if (treeFileUnchanged(beforeFile, afterFile)) continue;
+		const existing = changes.get(absPath);
+		const afterSnapshot: FileSnapshot = afterFile?.snapshot ?? { kind: "absent" };
+		if (existing) {
+			existing.after = afterSnapshot;
+		} else {
+			changes.set(absPath, {
+				before: beforeFile?.snapshot ?? { kind: "absent" },
+				after: afterSnapshot,
+			});
+		}
+		changed++;
+	}
+	return changed;
+}
+
+// ---------------------------------------------------------------------------
 // Persisted review state
 // ---------------------------------------------------------------------------
 
@@ -71,7 +230,8 @@ function isSnapshotKind(value: unknown): value is SnapshotKind {
 		value === "text" ||
 		value === "absent" ||
 		value === "binary" ||
-		value === "toolarge"
+		value === "toolarge" ||
+		value === "skipped"
 	);
 }
 

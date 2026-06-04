@@ -5,6 +5,7 @@ Review files Pi created or modified during a session, or browse the current proj
 ## What it does
 
 - Tracks every file touched by the `write` and `edit` tools across the current session.
+- Tracks files created, modified, or deleted under the session `cwd` by the `bash` tool using before/after project scans.
 - Keeps the original content and latest content for each tracked file.
 - Persists the tracked review set per Pi session, so it survives session switches, `/reload`, and Pi restarts.
 - Opens a full-screen overlay with two tabs: `Diff` and `Files`.
@@ -40,7 +41,7 @@ diff-review/
 Use this split when changing behaviour:
 
 - Change tracking or saved review state in `src/core/file-state.ts`.
-- Change diff rows, stats, or line wrapping in `src/core/diff-engine.ts`.
+- Change diff rows or stats in `src/core/diff-engine.ts`; change wrapping helpers in `src/core/browse-tree.ts`.
 - Change the footer `review` or `files` entry in `src/ui/footer.ts`.
 - Change the full-screen `Diff` or `Files` view in `src/ui/overlay.ts`.
 - Change key detection in `src/platform/keys.ts`.
@@ -86,7 +87,9 @@ Use `Tab` or `Shift+Tab` to switch between `📝 Diff` and `📁 Files`.
 
 ### Diff tab
 
-The diff tab has a file list on the left and a side-by-side diff on the right.
+The diff tab has a file list on the left and a vertical unified diff on the right.
+Added lines use `+` markers and an addition background; removed lines use `-`
+markers and a deletion background.
 
 | Key | Action |
 | --- | --- |
@@ -115,9 +118,10 @@ pane shows a tree. The right pane previews the selected directory or file.
 
 ## Tracking
 
-Changes are captured from the `tool_call` (before) and `tool_result` (after) hooks,
-which carry the validated tool arguments. The review set is saved per Pi session
-under:
+Changes are captured from the `tool_call` (before) and `tool_result` (after)
+hooks. For `write` and `edit`, the extension snapshots the addressed path. For
+`bash`, it snapshots the current project tree before and after the command. The
+review set is saved per Pi session under:
 
 ```text
 ~/.pi/agent/state/diff-review/
@@ -138,14 +142,15 @@ Use `/review status` to confirm tracking is working after an edit.
 ## Scope and limits
 
 - Tracking is **session-cumulative**: it accumulates all unreviewed changes.
-- Tracking is global to the session. Files edited outside the current directory are included in `Diff`.
-- Only `write` and `edit` are tracked. Changes made through `bash` are not captured.
+- Tracking is global to the session for `write` and `edit`; files edited outside the current directory are included in `Diff`.
+- `bash` tracking is project-scoped: it scans regular files under the session `cwd`, skipping common heavy folders.
+- Bash scans are capped at 2,500 files and 16 MB of captured text per scan; if a cap is hit, some files may show a note or be omitted.
 - New files show as all additions. Files reverted to their original content are hidden.
-- Binary files and files larger than 512 KB are listed with a note instead of a diff or preview.
-- Diff rows wrap to the before/after column width.
+- Binary files, skipped files, and files larger than 512 KB are listed with a note instead of a diff or preview.
+- Diff rows wrap to the unified diff pane width.
 - Files previews wrap long lines to the preview pane width.
 - `Files` skips common heavy folders such as `.git`, `node_modules`, `dist`, `build`, caches, and virtual environments.
-- Diff rows use colour-blind-safe labels and colours: `A+` blue for additions, `D-` vermillion/orange for deletions.
+- Diff rows use `+` / `-` markers, colour-blind-safe foreground colours, and distinct addition/deletion backgrounds.
 
 ## Notes
 

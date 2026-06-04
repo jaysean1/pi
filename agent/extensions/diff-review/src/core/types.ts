@@ -1,7 +1,7 @@
 // Shared diff-review data shapes.
 // Not for runtime logic or Pi UI registration.
 
-export type SnapshotKind = "text" | "absent" | "binary" | "toolarge";
+export type SnapshotKind = "text" | "absent" | "binary" | "toolarge" | "skipped";
 
 export interface FileSnapshot {
 	kind: SnapshotKind;
@@ -78,6 +78,15 @@ export interface WrappedPreviewLine {
 export interface WrappedDiffRow {
 	left: Cell;
 	right: Cell;
+}
+
+export type UnifiedDiffLineType = "same" | "add" | "del";
+
+export interface UnifiedDiffLine {
+	type: UnifiedDiffLineType;
+	oldNum?: number;
+	newNum?: number;
+	text: string;
 }
 
 export interface DiffStats {

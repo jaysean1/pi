@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { EditorComponent, Focusable } from "@earendil-works/pi-tui";
 import {
+	BASH_TOOL,
 	COMMAND_DEMO,
 	COMMAND_OPEN,
 	TOGGLE_KEY,
@@ -16,10 +17,12 @@ import {
 	clearPersistedChanges,
 	extractPath,
 	loadPersistedChanges,
+	mergeFileTreeChanges,
 	persistChanges,
 	replaceChanges,
 	resolveInputPath,
 	snapshotFile,
+	snapshotFileTree,
 } from "./src/core/file-state.ts";
 import { demoFiles } from "./src/demo.ts";
 import { describeKeyInput, isToggleKey } from "./src/platform/keys.ts";
@@ -37,8 +40,13 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	let persistWarningShown = false;
 	let activeWidget: DiffReviewWidget | undefined;
 	let activeEditor: (EditorComponent & Partial<Focusable>) | undefined;
+	let bashScanWarningShown = false;
 	// Session-cumulative change set, keyed by absolute path.
 	const changes = new Map<string, ChangeEntry>();
+	const bashBaselines = new Map<
+		string,
+		ReturnType<typeof snapshotFileTree>
+	>();
 
 	const refreshReviewWidget = () => {
 		activeWidget?.requestRender();
@@ -91,6 +99,15 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 		persistWarningShown = true;
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`Diff review could not ${action} saved state: ${message}`, "warning");
+	};
+
+	const warnBashScanTruncated = (ctx: ExtensionContext) => {
+		if (bashScanWarningShown) return;
+		bashScanWarningShown = true;
+		ctx.ui.notify(
+			"Diff review bash scan hit its safety cap; some bash changes may be omitted.",
+			"warning",
+		);
 	};
 
 	const loadChanges = (ctx: ExtensionContext) => {
@@ -207,11 +224,17 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// Capture the original content before a write/edit runs, then the latest
-	// content after it succeeds. tool_call and tool_result carry validated args
-	// (an object with the path) and are the same hooks the git-checkpoint example
-	// uses, unlike tool_execution_* which can carry raw arguments.
+	// Capture original content before a write/edit runs, then latest content after
+	// it succeeds. For bash, snapshot the cwd tree before/after execution so files
+	// created or changed by shell commands also enter the review set.
 	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName === BASH_TOOL) {
+			const baseline = snapshotFileTree(ctx.cwd);
+			if (baseline.truncated) warnBashScanTruncated(ctx);
+			bashBaselines.set(event.toolCallId, baseline);
+			return;
+		}
+
 		if (!TRACKED_TOOLS.has(event.toolName)) return;
 		const raw = extractPath(event.input);
 		if (!raw) return;
@@ -226,6 +249,17 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", (event, ctx) => {
+		if (event.toolName === BASH_TOOL) {
+			const baseline = bashBaselines.get(event.toolCallId);
+			bashBaselines.delete(event.toolCallId);
+			if (!baseline) return;
+			const latest = snapshotFileTree(ctx.cwd);
+			if (baseline.truncated || latest.truncated) warnBashScanTruncated(ctx);
+			if (mergeFileTreeChanges(changes, baseline, latest) > 0) saveChanges(ctx);
+			else refreshReviewWidget();
+			return;
+		}
+
 		if (!TRACKED_TOOLS.has(event.toolName) || event.isError) return;
 		const raw = extractPath(event.input);
 		if (!raw) return;
@@ -241,6 +275,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		bashBaselines.clear();
 		saveChanges(ctx);
 	});
 
