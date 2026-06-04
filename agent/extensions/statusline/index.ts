@@ -1,6 +1,7 @@
 // statusline — owns the footer surface and renders the generic session status:
 //   line 1: working directory (+ git branch, + session name)
-//   line 2: token/cost stats · (provider) model • <reasoning effort, colored>
+//   line 2: Ctx: <percent> / <window> · Cost: <amount> · (provider) model
+//           • <reasoning effort, colored>
 //   line 3+: extension status lines contributed via ctx.ui.setStatus()
 //
 // This is intentionally feature-agnostic. Interactive affordances (e.g. the

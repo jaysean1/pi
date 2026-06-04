@@ -1,5 +1,5 @@
 // Standalone statusline footer: working directory + git branch + session name,
-// token/cost stats with the active model and its reasoning effort, plus any
+// context/cost stats with the active model and its reasoning effort, plus any
 // extension status lines (e.g. codex-claude-usage). Owns the footer surface via
 // ctx.ui.setFooter(); knows nothing about diff review or any other feature.
 
@@ -80,10 +80,6 @@ export class StatuslineFooter implements Component {
 	}
 
 	private renderStatsLine(width: number): string {
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
 		let totalCost = 0;
 
 		for (const entry of this.ctx.sessionManager.getEntries()) {
@@ -91,23 +87,12 @@ export class StatuslineFooter implements Component {
 				type?: string;
 				message?: {
 					role?: string;
-					usage?: {
-						input?: unknown;
-						output?: unknown;
-						cacheRead?: unknown;
-						cacheWrite?: unknown;
-						cost?: { total?: unknown };
-					};
+					usage?: { cost?: { total?: unknown } };
 				};
 			};
 			if (record.type !== "message" || record.message?.role !== "assistant")
 				continue;
-			const usage = record.message.usage;
-			totalInput += usageNumber(usage?.input);
-			totalOutput += usageNumber(usage?.output);
-			totalCacheRead += usageNumber(usage?.cacheRead);
-			totalCacheWrite += usageNumber(usage?.cacheWrite);
-			totalCost += usageNumber(usage?.cost?.total);
+			totalCost += usageNumber(record.message.usage?.cost?.total);
 		}
 
 		const contextUsage = this.ctx.getContextUsage();
@@ -115,36 +100,29 @@ export class StatuslineFooter implements Component {
 			contextUsage?.contextWindow ?? this.ctx.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent =
-			contextUsage?.percent === null ? "?" : contextPercentValue.toFixed(1);
-		const contextPercentDisplay =
-			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}`;
-		const contextPercentText =
+			contextUsage?.percent === null
+				? "?"
+				: `${Math.round(contextPercentValue)}%`;
+		const contextValueDisplay = `${contextPercent} / ${formatTokens(
+			contextWindow,
+		)}`;
+		const contextValueText =
 			contextPercentValue > 90
-				? this.theme.fg("error", contextPercentDisplay)
+				? this.theme.fg("error", contextValueDisplay)
 				: contextPercentValue > 70
-					? this.theme.fg("warning", contextPercentDisplay)
-					: contextPercentDisplay;
+					? this.theme.fg("warning", contextValueDisplay)
+					: contextValueDisplay;
+		const contextRendered =
+			this.theme.fg("dim", "Ctx: ") + contextValueText;
+		const costRendered = this.theme.fg(
+			"dim",
+			`Cost: $${totalCost.toFixed(1)}`,
+		);
 
-		const statsParts: string[] = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-
-		const usingSubscription = this.ctx.model
-			? this.ctx.modelRegistry.isUsingOAuth(this.ctx.model)
-			: false;
-		if (totalCost || usingSubscription) {
-			statsParts.push(
-				`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`,
-			);
-		}
-		statsParts.push(contextPercentText);
-
-		const statsLeft = statsParts.join(" ");
-		const statsLeftWidth = visibleWidth(statsLeft);
+		const statsLeftText = `Ctx: ${contextPercent} / ${formatTokens(
+			contextWindow,
+		)} · Cost: $${totalCost.toFixed(1)}`;
+		const statsLeftWidth = visibleWidth(statsLeftText);
 
 		// Reasoning-effort badge for the current model, always shown to the right
 		// of the model name (e.g. `… • xhigh`). The level token is tinted with the
@@ -174,7 +152,8 @@ export class StatuslineFooter implements Component {
 			this.theme.getThinkingBorderColor(level)(levelLabel);
 
 		return this.composeSimpleLine(width, [
-			this.theme.fg("dim", statsLeft),
+			contextRendered,
+			costRendered,
 			rightRendered,
 		]);
 	}
