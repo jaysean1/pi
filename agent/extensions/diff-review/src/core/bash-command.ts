@@ -161,10 +161,80 @@ function stripComments(command: string): string {
 		.join("\n");
 }
 
+interface OutputRedirection {
+	targetStart: number;
+	operator: string;
+}
+
+function outputRedirectionAt(
+	command: string,
+	index: number,
+): OutputRedirection | undefined {
+	if (index > 0 && command[index - 1] === "\\") return undefined;
+
+	const ch = command[index];
+	if (ch === "&" && command[index + 1] === ">") {
+		let end = index + 2;
+		if (command[end] === ">") end++;
+		return { targetStart: end, operator: command.slice(index, end) };
+	}
+
+	let redirect = index;
+	while (/\d/.test(command[redirect] ?? "")) redirect++;
+	if (command[redirect] !== ">") return undefined;
+
+	let end = redirect + 1;
+	if (command[end] === ">" || command[end] === "|" || command[end] === "&") {
+		end++;
+	}
+	return { targetStart: end, operator: command.slice(redirect, end) };
+}
+
+function readRedirectionTarget(
+	command: string,
+	start: number,
+): { token: string; end: number } | undefined {
+	let i = start;
+	while (i < command.length && /\s/.test(command[i]!)) i++;
+	if (i >= command.length) return undefined;
+
+	let token = "";
+	while (i < command.length) {
+		const ch = command[i]!;
+		if (/\s/.test(ch) || ch === ";" || ch === "|" || ch === "&") break;
+		if (ch === "\\") {
+			token += command.slice(i, i + 2);
+			i += 2;
+			continue;
+		}
+		token += ch;
+		i++;
+	}
+	return token ? { token, end: i } : undefined;
+}
+
+function isSafeOutputRedirectTarget(
+	operator: string,
+	target: string | undefined,
+): boolean {
+	if (!target) return false;
+	if (target === "/dev/null") return true;
+	if (operator === ">&") return target === "-" || /^\d+$/.test(target);
+	return false;
+}
+
 function hasOutputRedirection(maskedCommand: string): boolean {
-	// Treat any output-looking redirection as write-like, including stderr-only
-	// redirection. This is intentionally conservative: `2>&1` will be scanned.
-	return /(^|[^\\])(?:&>|>\||>>|\d*>)/.test(maskedCommand);
+	// Only file-writing output redirections should make an otherwise read-only
+	// command scan the project. Harmless shell plumbing such as `2>/dev/null`,
+	// `>/dev/null`, and `2>&1` does not touch reviewable files.
+	for (let i = 0; i < maskedCommand.length; i++) {
+		const redirect = outputRedirectionAt(maskedCommand, i);
+		if (!redirect) continue;
+		const target = readRedirectionTarget(maskedCommand, redirect.targetStart);
+		if (!isSafeOutputRedirectTarget(redirect.operator, target?.token)) return true;
+		i = target?.end ?? redirect.targetStart;
+	}
+	return false;
 }
 
 function commandBase(token: string | undefined): string | undefined {

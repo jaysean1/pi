@@ -6,7 +6,7 @@ Review files Pi created or modified during a session, or browse the current proj
 
 - Tracks every file touched by the `write` and `edit` tools across the current session.
 - Tracks files created, modified, or deleted under the session `cwd` by write-like or ambiguous `bash` commands using before/after project scans.
-- Skips clearly read-only `bash` commands such as `pwd`, `ls`, `find`, `rg`, and `git diff` to avoid unnecessary scans.
+- Skips clearly read-only `bash` commands such as `pwd`, `ls`, `find`, `rg`, and `git diff`, including harmless redirections like `2>/dev/null` and `2>&1`.
 - Keeps the original content and latest content for each tracked file.
 - Persists the tracked review set per Pi session, so it survives session switches, `/reload`, and Pi restarts.
 - Opens a full-screen overlay with two tabs: `Diff` and `Files`.
@@ -146,8 +146,8 @@ Use `/review status` to confirm tracking is working after an edit.
 
 - Tracking is **session-cumulative**: it accumulates all unreviewed changes.
 - Tracking is global to the session for `write` and `edit`; files edited outside the current directory are included in `Diff`.
-- `bash` tracking is project-scoped: write-like or ambiguous commands scan regular files under the session `cwd`, skipping common heavy folders.
-- Clearly read-only `bash` commands are not scanned, which avoids warnings and startup-scale scans for commands such as `pwd`, `ls`, `find`, `rg`, and `git status`.
+- `bash` tracking is project-scoped: write-like or ambiguous commands scan regular files under the session `cwd`, skipping common heavy folders and nested Git worktrees/submodules.
+- Clearly read-only `bash` commands are not scanned, which avoids warnings and startup-scale scans for commands such as `pwd`, `ls`, `find`, `rg`, `git status`, and `rg x . 2>/dev/null`.
 - Bash scans are capped at 2,500 files and 16 MB of captured text per scan; if a cap is hit, some files may show a note or be omitted.
 - New files show as all additions. Files reverted to their original content are hidden.
 - Binary files, skipped files, and files larger than 512 KB are listed with a note instead of a diff or preview.

@@ -91,6 +91,15 @@ interface TreeScanBudget {
 	truncated: boolean;
 }
 
+function hasGitWorktreeMarker(absDir: string): boolean {
+	try {
+		const st = statSync(join(absDir, ".git"));
+		return st.isDirectory() || st.isFile();
+	} catch {
+		return false;
+	}
+}
+
 function snapshotTreeFile(
 	absPath: string,
 	size: number,
@@ -112,8 +121,9 @@ function snapshotTreeFile(
 }
 
 // Snapshot regular files below root before/after a bash tool. This is capped and
-// skips common heavy directories, so bash tracking is best-effort for very large
-// trees but captures normal project file creation/modification/deletion.
+// skips common heavy directories plus nested Git worktrees/submodules, so bash
+// tracking is best-effort for very large trees but captures normal project file
+// creation/modification/deletion.
 export function snapshotFileTree(root: string): FileTreeSnapshot {
 	const files = new Map<string, TreeFileSnapshot>();
 	const budget: TreeScanBudget = { files: 0, textBytes: 0, truncated: false };
@@ -139,6 +149,10 @@ export function snapshotFileTree(root: string): FileTreeSnapshot {
 			if (IGNORED_BROWSE_NAMES.has(entry.name)) continue;
 			const absPath = join(dir, entry.name);
 			if (entry.isDirectory()) {
+				// Treat nested Git worktrees/submodules as external projects. The cwd root
+				// itself is still scanned, but child repos can be very large and are usually
+				// unrelated to the active review session.
+				if (absPath !== rootAbs && hasGitWorktreeMarker(absPath)) continue;
 				visit(absPath);
 				continue;
 			}
