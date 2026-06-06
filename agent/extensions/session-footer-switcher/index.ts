@@ -217,6 +217,15 @@ function asciiDisplayText(text: string): string {
 	return text.replace(/→/g, "->");
 }
 
+// Paint a full-width selection band behind a row. `th.bg` resets only the
+// background (\x1b[49m), so any foreground/bold styling already baked into
+// `line` survives. The line is padded with spaces to the overlay width first so
+// the highlight reaches the right edge instead of stopping at the text.
+function withSelectedBackground(th: Theme, line: string, width: number): string {
+	const padding = Math.max(0, width - visibleWidth(line));
+	return th.bg("selectedBg", line + " ".repeat(padding));
+}
+
 function isFocusableComponent(component: Component): component is Component & Focusable {
 	return "focused" in component;
 }
@@ -409,7 +418,11 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		const labelStyled = isSelected ? th.bold(th.fg("accent", label)) : th.fg("accent", label);
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
 
-		return [` ${cursor}  ${bracketL} ${labelStyled} ${bracketR}`];
+		const row = ` ${cursor}  ${bracketL} ${labelStyled} ${bracketR}`;
+		// When selected, paint a full-width highlight bar behind the row so the
+		// active entry reads as a solid selected band (mirrors the built-in
+		// session selector's `selectedBg` treatment).
+		return [isSelected ? withSelectedBackground(th, row, width) : row];
 	}
 
 	private renderSessionItem(item: SessionItem, index: number, width: number): string {
@@ -431,7 +444,10 @@ class SessionSwitcherOverlay implements Component, Focusable {
 			: isCurrent
 				? th.fg("success", body)
 				: th.fg("text", body);
-		return ` ${cursor} ${styled}`;
+		const line = ` ${cursor} ${styled}`;
+		// Selected row gets a full-width `selectedBg` band so the active item is
+		// unmistakable even on wide CJK rows where the cursor alone is easy to miss.
+		return isSelected ? withSelectedBackground(th, line, width) : line;
 	}
 
 	private currentPath(): string | undefined {
