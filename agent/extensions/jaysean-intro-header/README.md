@@ -1,4 +1,4 @@
-# jaysean-intro-header
+  # jaysean-intro-header
 
 An animated 3D ASCII wordmark shown at the top of the Pi UI on startup, with a Claude Code-style two-space left inset.
 
