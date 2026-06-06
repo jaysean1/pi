@@ -397,19 +397,26 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		return lines;
 	}
 
+	private sessionNumberWidth(): number {
+		return Math.max(2, `${this.sessions.length}.`.length);
+	}
+
 	// Render the "New session" entry as a compact single-line bracket button so it
 	// reads as a distinct, clickable-looking control rather than a plain list row
-	// without consuming three vertical lines. The brackets are drawn in the accent
-	// color when selected and the muted border color otherwise; a "›" cursor sits
-	// to the left.
+	// without consuming three vertical lines. It shares the same row grid as saved
+	// sessions: cursor column, index column, then content column. A dim dot fills
+	// the numeric digit slot (with a trailing spacer replacing the period) so the
+	// button starts exactly where session titles start.
 	private renderNewSessionRow(width: number): string[] {
 		const th = this.theme;
 		const isSelected = this.selectedIndex === 0;
 		const content = "+  New session";
-		// Single-line layout: " › [ label ] ". The fixed prefix/suffix (cursor +
-		// brackets + padding) take 8 columns, so clamp the label to the remaining
-		// width so the button never overflows on narrow terminals.
-		const labelWidth = Math.max(1, width - 8);
+		const cursorPlain = isSelected ? "›" : " ";
+		const placeholderPlain = `${" ".repeat(Math.max(0, this.sessionNumberWidth() - 2))}· `;
+		const prefixPlain = ` ${cursorPlain} ${placeholderPlain} `;
+		// Clamp against the computed grid prefix plus "[ label ]" chrome so the
+		// button never overflows on narrow terminals.
+		const labelWidth = Math.max(1, width - visibleWidth(prefixPlain) - 4);
 		const label = truncateToWidth(content, labelWidth, "...");
 
 		const borderColor = isSelected ? "accent" : "border";
@@ -417,8 +424,9 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		const bracketR = th.fg(borderColor, "]");
 		const labelStyled = isSelected ? th.bold(th.fg("accent", label)) : th.fg("accent", label);
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
+		const placeholder = th.fg("dim", placeholderPlain);
 
-		const row = ` ${cursor}  ${bracketL} ${labelStyled} ${bracketR}`;
+		const row = ` ${cursor} ${placeholder} ${bracketL} ${labelStyled} ${bracketR}`;
 		// When selected, paint a full-width highlight bar behind the row so the
 		// active entry reads as a solid selected band (mirrors the built-in
 		// session selector's `selectedBg` treatment).
@@ -431,13 +439,12 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		const isSelected = index === this.selectedIndex - 1;
 		const isCurrent = item.info.path === this.currentPath();
 		const cursorChar = isSelected ? "›" : " ";
-		const number = `${index + 1}.`.padStart(3, " ");
-		const currentMarker = isCurrent ? "*" : " ";
+		const number = `${index + 1}.`.padStart(this.sessionNumberWidth(), " ");
 		// Plain prefix drives the width math; color is applied afterwards.
-		const prefixPlain = ` ${cursorChar} ${number} ${currentMarker} `;
+		const prefixPlain = ` ${cursorChar} ${number} `;
 		const titleWidth = Math.max(1, width - visibleWidth(prefixPlain));
 		const titleText = truncateToWidth(asciiDisplayText(item.summary.title), titleWidth, "...");
-		const body = `${number} ${currentMarker} ${titleText}`;
+		const body = `${number} ${titleText}`;
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
 		const styled = isSelected
 			? th.bold(th.fg("accent", body))
