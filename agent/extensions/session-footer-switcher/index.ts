@@ -680,6 +680,13 @@ class ShortcutBridgeWrapper implements EditorComponent, Focusable {
 		this.base.setAutocompleteMaxVisible?.(maxVisible);
 	}
 
+	// Forward autocomplete visibility so consumers that query the editor (the host
+	// and other extensions' input handlers) get a truthful answer through the proxy.
+	isShowingAutocomplete(): boolean {
+		const editor = this.base as { isShowingAutocomplete?: () => boolean };
+		return editor.isShowingAutocomplete?.() === true;
+	}
+
 	invalidate(): void {
 		this.base.invalidate();
 	}

@@ -111,6 +111,10 @@ export class EditorShortcutBridge implements EditorComponent, Focusable {
 	setAutocompleteMaxVisible(maxVisible: number): void {
 		this.base.setAutocompleteMaxVisible?.(maxVisible);
 	}
+	isShowingAutocomplete(): boolean {
+		const editor = this.base as { isShowingAutocomplete?: () => boolean };
+		return editor.isShowingAutocomplete?.() === true;
+	}
 	invalidate(): void {
 		this.base.invalidate();
 	}

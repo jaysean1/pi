@@ -317,6 +317,29 @@ end run`;
 		return (editorRef as { focused?: boolean } | undefined)?.focused === true;
 	}
 
+	// Some extensions wrap the editor; walk the `.base` chain so completion
+	// menus keep ownership of ↑/↓ while autocomplete is open.
+	function isEditorAutocompleteOpen(): boolean {
+		let node: unknown = editorRef;
+		const seen = new Set<unknown>();
+
+		for (let depth = 0; node && depth < 10 && !seen.has(node); depth++) {
+			seen.add(node);
+			const probe = node as {
+				isShowingAutocomplete?: () => boolean;
+				base?: unknown;
+			};
+			if (
+				typeof probe.isShowingAutocomplete === "function" &&
+				probe.isShowingAutocomplete() === true
+			) {
+				return true;
+			}
+			node = probe.base;
+		}
+		return false;
+	}
+
 	// --- lifecycle -----------------------------------------------------------
 
 	function stopTimers(): void {
@@ -382,6 +405,7 @@ end run`;
 				matchesKey(data, Key.down) &&
 				isEditorFocused() &&
 				!preview.focused &&
+				!isEditorAutocompleteOpen() &&
 				ctx.ui.getEditorText().trim().length === 0
 			) {
 				preview.focus();
