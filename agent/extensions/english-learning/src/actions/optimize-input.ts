@@ -25,7 +25,10 @@ export async function optimizeCurrentInput(
 	try {
 		const choice = resolveModel(ctx, "rewrite");
 		if (!choice) {
-			ctx.ui.notify("No logged-in model available for English optimization. Run /login first.", "error");
+			ctx.ui.notify(
+				"No OpenAI subscription model available for English optimization. Run /login and select ChatGPT Plus/Pro (Codex Subscription).",
+				"error",
+			);
 			return;
 		}
 
@@ -51,7 +54,6 @@ export async function optimizeCurrentInput(
 				apiKey: auth.apiKey,
 				headers: auth.headers,
 				signal: controller.signal,
-				temperature: 0.2,
 				maxTokens: Math.min(choice.model.maxTokens ?? 2_048, 2_048),
 			},
 		);

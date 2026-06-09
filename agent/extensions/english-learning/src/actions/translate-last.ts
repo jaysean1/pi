@@ -1,12 +1,17 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { streamSimple, type UserMessage } from "@earendil-works/pi-ai";
-import { MAX_TRANSLATE_CHARS, TRANSLATE_TIMEOUT_MS } from "../core/config.ts";
+import { MAX_TRANSLATE_CHARS, OPENAI_SUBSCRIPTION_PROVIDER, TRANSLATE_TIMEOUT_MS } from "../core/config.ts";
 import { getLastAssistantText } from "../core/last-assistant.ts";
 import { segmentMarkdown } from "../core/markdown-segments.ts";
 import { resolveModelCandidates } from "../core/model-resolver.ts";
 import { buildTranslateUserPrompt, TRANSLATE_SYSTEM_PROMPT } from "../core/prompts.ts";
 import { SegmentTranslationParser } from "../core/stream-protocol.ts";
 import { estimateMaxTokensFromChars, isLikelyEnglish, textFromContent } from "../core/text-utils.ts";
+import {
+	applyCachedTranslations,
+	getCachedTranslations,
+	storeCachedTranslations,
+} from "../core/translation-cache.ts";
 import type { ModelChoice, TranslationCloseReason, TranslationSegment } from "../types.ts";
 import { TranslationOverlay } from "../ui/translation-overlay.ts";
 
@@ -23,8 +28,12 @@ interface ResolvedAuth {
 
 let activeOverlay: ActiveOverlay | undefined;
 
+function formatProviderLabel(provider: string): string {
+	return provider === OPENAI_SUBSCRIPTION_PROVIDER ? "openai subscription" : provider;
+}
+
 function formatOverlayModelLabel(choice: ModelChoice): string {
-	return `(${choice.model.provider}) ${choice.model.id}`;
+	return `(${formatProviderLabel(choice.model.provider)}) ${choice.model.id}`;
 }
 
 export function isTranslationOverlayOpen(): boolean {
@@ -74,9 +83,15 @@ export async function openOrToggleTranslation(
 		return;
 	}
 
-	const candidates = segmentation.translatableCount > 0 ? resolveModelCandidates(ctx, "translate") : [];
-	if (segmentation.translatableCount > 0 && candidates.length === 0) {
-		ctx.ui.notify("No logged-in model available for translation. Run /login first.", "error");
+	const cached = getCachedTranslations(last.text, segmentation.segments);
+	if (cached) applyCachedTranslations(cached, segmentation.segments);
+
+	const candidates = !cached && segmentation.translatableCount > 0 ? resolveModelCandidates(ctx, "translate") : [];
+	if (!cached && segmentation.translatableCount > 0 && candidates.length === 0) {
+		ctx.ui.notify(
+			"No OpenAI subscription model available for translation. Run /login and select ChatGPT Plus/Pro (Codex Subscription).",
+			"error",
+		);
 		return;
 	}
 
@@ -94,9 +109,11 @@ export async function openOrToggleTranslation(
 		await ctx.ui.custom<TranslationCloseReason>(
 			(tui, theme, _keybindings, done) => {
 				overlay = new TranslationOverlay(tui, theme, segmentation.segments, {
-					modelLabel: candidates[0]
-						? formatOverlayModelLabel(candidates[0])
-						: "none needed",
+					modelLabel: cached
+						? `${cached.modelLabel} · cached`
+						: candidates[0]
+							? formatOverlayModelLabel(candidates[0])
+							: "none needed",
 					translatableCount: segmentation.translatableCount,
 					codeBlockCount: segmentation.codeBlockCount,
 					done,
@@ -109,7 +126,11 @@ export async function openOrToggleTranslation(
 						overlay.setRunStatus("done", "Only code blocks were found; nothing was translated.");
 						return;
 					}
-					void runSegmentedTranslation(ctx, overlay, segmentation.segments, candidates, controller.signal);
+					if (cached) {
+						overlay.setRunStatus("done", `Loaded ${segmentation.translatableCount} segment(s) from cache.`);
+						return;
+					}
+					void runSegmentedTranslation(ctx, overlay, segmentation.segments, candidates, controller.signal, last.text);
 				});
 
 				return overlay;
@@ -141,6 +162,7 @@ async function runSegmentedTranslation(
 	segments: TranslationSegment[],
 	candidates: ModelChoice[],
 	signal: AbortSignal,
+	sourceText: string,
 ): Promise<void> {
 	const promptText = buildTranslateUserPrompt(segments);
 	const userMessage: UserMessage = {
@@ -169,7 +191,8 @@ async function runSegmentedTranslation(
 		const before = hasAnyTranslatedText(segments);
 		try {
 			await runSingleModelTranslation(overlay, segments, choice, auth, userMessage, promptText, signal);
-			overlay.setRunStatus("done", "Done");
+			const cached = storeCachedTranslations(sourceText, segments, formatOverlayModelLabel(choice));
+			overlay.setRunStatus("done", cached ? "Done · cached for reuse" : "Done");
 			return;
 		} catch (error) {
 			if (signal.aborted || overlay.isClosed()) {
@@ -228,11 +251,10 @@ async function runSingleModelTranslation(
 			apiKey: auth.apiKey,
 			headers: auth.headers,
 			signal,
-			temperature: 0.1,
 			maxTokens: estimateMaxTokensFromChars(promptText.length, choice.model.maxTokens),
-			// Translation is a low-reasoning task. Leaving this undefined lets Pi's
-			// provider adapter use the model/provider default and avoids unnecessary
-			// reasoning params on subscription-backed providers.
+			// Match session-recap's subscription path: OpenAI Codex subscription
+			// rejects unsupported sampling params such as temperature, so let the
+			// provider use its defaults.
 			reasoning: undefined,
 		},
 	);

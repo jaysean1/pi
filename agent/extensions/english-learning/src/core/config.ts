@@ -12,25 +12,16 @@ export const TRANSLATE_SEQUENCE_KAKU = "\x1b[993~";
 export const REWRITE_TIMEOUT_MS = 8_000;
 export const TRANSLATE_TIMEOUT_MS = 120_000;
 export const MAX_TRANSLATE_CHARS = 80_000;
+export const TRANSLATION_CACHE_MAX_ENTRIES = 50;
 
-export const REWRITE_MODEL_PRIORITIES = [
-	"openai/gpt-5-mini",
-	"openai/gpt-5.4-mini",
-	"openai/gpt-4.1-mini",
-	"openai/gpt-5.1-codex-mini",
+export const OPENAI_SUBSCRIPTION_PROVIDER = "openai-codex";
+
+const OPENAI_SUBSCRIPTION_MODEL_PRIORITIES = [
+	"openai-codex/gpt-5.4-mini",
+	"openai-codex/gpt-5.4",
+	"openai-codex/gpt-5.5",
+	"openai-codex/gpt-5.3-codex-spark",
 ] as const;
 
-export const TRANSLATE_MODEL_PRIORITIES = [
-	"openai/gpt-5-mini",
-	"openai/gpt-5.4-mini",
-	"openai/gpt-4.1-mini",
-	"openai/gpt-5.1-codex-mini",
-] as const;
-
-export const FAST_MODEL_KEYWORDS = [
-	"mini",
-	"lite",
-	"haiku",
-	"flash",
-	"turbo",
-] as const;
+export const REWRITE_MODEL_PRIORITIES = OPENAI_SUBSCRIPTION_MODEL_PRIORITIES;
+export const TRANSLATE_MODEL_PRIORITIES = OPENAI_SUBSCRIPTION_MODEL_PRIORITIES;

@@ -24,6 +24,8 @@ const RESET_FG = "\x1b[39m";
 const RESET_BG = "\x1b[49m";
 const HEADER_ROWS = 5;
 const FOOTER_ROWS = 1;
+const DIFF_SEPARATOR = " │ ";
+const DIFF_SEPARATOR_WIDTH = 3;
 
 function ansiFg(theme: Theme, truecolor: string, fallback256: number): string {
 	return theme.getColorMode() === "truecolor"
@@ -70,10 +72,6 @@ function blockText(theme: Theme, tone: BlockTone, text: string): string {
 		return `${ansiFg(theme, "\x1b[38;2;48;105;68m", 29)}${text}${RESET_FG}`;
 	}
 	return `${ansiFg(theme, "\x1b[38;2;31;41;55m", 235)}${text}${RESET_FG}`;
-}
-
-function titleText(theme: Theme, tone: BlockTone, text: string): string {
-	return rail(theme, tone, theme.bold(text));
 }
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
@@ -247,7 +245,7 @@ export class TranslationOverlay implements Component {
 					: this.runStatus === "done"
 						? "success"
 						: "accent";
-		const title = th.fg("toolTitle", th.bold("Translate")) + th.fg("muted", " · Last assistant response");
+		const title = th.fg("toolTitle", th.bold("Translate")) + th.fg("muted", " · Side-by-side diff · Last assistant response");
 		const codeSummary = this.options.codeBlockCount > 0
 			? `</> ${plural(this.options.codeBlockCount, "code block")} shown once`
 			: "</> 0 code blocks";
@@ -325,12 +323,10 @@ export class TranslationOverlay implements Component {
 			return;
 		}
 
-		this.renderTextBlock(lines, "Original", segment.source, width, "original");
-
 		if (segment.status === "error") {
-			this.renderTextBlock(
+			this.renderDiffBlock(
 				lines,
-				"Translation",
+				segment.source,
 				`Error: ${segment.error ?? "translation failed"}`,
 				width,
 				"error",
@@ -345,37 +341,68 @@ export class TranslationOverlay implements Component {
 			: showCursor
 				? "▌"
 				: "…";
-		this.renderTextBlock(lines, "Translation", targetText, width, "translation");
+		this.renderDiffBlock(lines, segment.source, targetText, width, "translation");
 	}
 
-	private renderTextBlock(
+	private renderDiffBlock(
 		lines: string[],
-		label: string,
-		text: string,
+		original: string,
+		translation: string,
 		width: number,
-		tone: BlockTone,
+		translationTone: BlockTone,
 	): void {
-		lines.push(this.renderBlockLine(label, width, tone, { title: true }));
-		for (const wrapped of wrapBlock(text, Math.max(1, width - 2))) {
-			lines.push(this.renderBlockLine(wrapped, width, tone));
+		const { leftWidth, rightWidth } = this.diffColumnWidths(width);
+		const separator = this.theme.fg("borderMuted", DIFF_SEPARATOR);
+		const leftTitle = this.renderCellLine("Original", leftWidth, "original", { title: true });
+		const rightTitle = this.renderCellLine("Translation", rightWidth, translationTone, { title: true });
+		lines.push(leftTitle + separator + rightTitle);
+
+		const leftRows = this.renderCellLines(original, leftWidth, "original");
+		const rightRows = this.renderCellLines(translation, rightWidth, translationTone);
+		const rowCount = Math.max(leftRows.length, rightRows.length);
+		for (let i = 0; i < rowCount; i++) {
+			lines.push(
+				(leftRows[i] ?? this.renderBlankCell(leftWidth, "original")) +
+				separator +
+				(rightRows[i] ?? this.renderBlankCell(rightWidth, translationTone)),
+			);
 		}
 	}
 
-	private renderBlockLine(
+	private diffColumnWidths(width: number): { leftWidth: number; rightWidth: number } {
+		const available = Math.max(2, width - DIFF_SEPARATOR_WIDTH);
+		const leftWidth = Math.floor(available / 2);
+		return {
+			leftWidth,
+			rightWidth: available - leftWidth,
+		};
+	}
+
+	private renderCellLines(text: string, width: number, tone: BlockTone): string[] {
+		return wrapBlock(text, Math.max(1, width - 2)).map((line) =>
+			this.renderCellLine(line, width, tone),
+		);
+	}
+
+	private renderCellLine(
 		content: string,
 		width: number,
 		tone: BlockTone,
 		options: { title?: boolean } = {},
 	): string {
 		const prefix = "▌ ";
-		const styled =
-			rail(this.theme, tone, prefix) +
-			(options.title ? titleText(this.theme, tone, content) : blockText(this.theme, tone, content));
-		return blockBg(this.theme, tone, padTo(styled, width));
+		const contentText = options.title
+			? rail(this.theme, tone, this.theme.bold(content))
+			: blockText(this.theme, tone, content);
+		return blockBg(this.theme, tone, padTo(rail(this.theme, tone, prefix) + contentText, width));
+	}
+
+	private renderBlankCell(width: number, tone: BlockTone): string {
+		return blockBg(this.theme, tone, " ".repeat(Math.max(0, width)));
 	}
 
 	private renderCodeBlock(lines: string[], source: string, width: number): void {
-		lines.push(this.renderBlockLine("Code shown once", width, "code", { title: true }));
+		lines.push(this.renderCellLine("Code shown once", width, "code", { title: true }));
 		const prefix = "  ";
 		const contentWidth = Math.max(1, width - prefix.length);
 		for (const raw of source.split("\n")) {

@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
-	FAST_MODEL_KEYWORDS,
+	OPENAI_SUBSCRIPTION_PROVIDER,
 	REWRITE_MODEL_PRIORITIES,
 	TRANSLATE_MODEL_PRIORITIES,
 } from "./config.ts";
@@ -11,20 +11,19 @@ function modelKey(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-function scoreFastModel(model: Model<Api>, purpose: ModelPurpose): number {
+function isOpenAISubscriptionModel(model: Model<Api>): boolean {
+	return model.provider === OPENAI_SUBSCRIPTION_PROVIDER;
+}
+
+function scoreSubscriptionModel(model: Model<Api>): number {
 	const key = modelKey(model).toLowerCase();
 	let score = 0;
-	if (model.provider === "openai") score += 100;
 	if (key.includes("gpt")) score += 40;
 	if (key.includes("mini")) score += 35;
-	if (key.includes("4.1-mini")) score += purpose === "rewrite" ? 22 : 12;
-	if (key.includes("5-mini")) score += purpose === "translate" ? 22 : 16;
-	if (key.includes("5.4-mini")) score += 18;
-	for (const keyword of FAST_MODEL_KEYWORDS) {
-		if (key.includes(keyword)) score += 8;
-	}
-	if (key.includes("codex")) score -= purpose === "translate" ? 15 : 6;
-	if (key.includes("thinking")) score -= 10;
+	if (key.includes("5.4-mini")) score += 24;
+	if (key.includes("5.4")) score += 12;
+	if (key.includes("5.5")) score += 10;
+	if (key.includes("spark")) score -= 5;
 	return score;
 }
 
@@ -41,13 +40,6 @@ export function resolveModelCandidates(ctx: ExtensionContext, purpose: ModelPurp
 		choices.push({ model, reason });
 	};
 
-	// For translation, include the current Pi model first. It is the model/provider
-	// that just worked for the conversation, so it is the safest fallback for
-	// subscription/OAuth-backed providers even if it is not the absolute fastest.
-	if (purpose === "translate" && ctx.model && ctx.modelRegistry.hasConfiguredAuth(ctx.model)) {
-		add(ctx.model, "current Pi model / logged subscription");
-	}
-
 	for (const priority of priorities) {
 		const slash = priority.indexOf("/");
 		const provider = priority.slice(0, slash);
@@ -59,19 +51,15 @@ export function resolveModelCandidates(ctx: ExtensionContext, purpose: ModelPurp
 	}
 
 	for (const model of available
-		.filter((model) => model.provider === "openai" && model.id.toLowerCase().includes("mini"))
-		.sort((a, b) => scoreFastModel(b, purpose) - scoreFastModel(a, purpose))) {
-		add(model, "available OpenAI mini model");
+		.filter((model) => isOpenAISubscriptionModel(model) && model.id.toLowerCase().includes("mini"))
+		.sort((a, b) => scoreSubscriptionModel(b) - scoreSubscriptionModel(a))) {
+		add(model, "available OpenAI subscription mini model");
 	}
 
 	for (const model of available
-		.filter((model) => FAST_MODEL_KEYWORDS.some((keyword) => modelKey(model).toLowerCase().includes(keyword)))
-		.sort((a, b) => scoreFastModel(b, purpose) - scoreFastModel(a, purpose))) {
-		add(model, "available fast model");
-	}
-
-	if (ctx.model && ctx.modelRegistry.hasConfiguredAuth(ctx.model)) {
-		add(ctx.model, "current Pi model fallback");
+		.filter(isOpenAISubscriptionModel)
+		.sort((a, b) => scoreSubscriptionModel(b) - scoreSubscriptionModel(a))) {
+		add(model, "available OpenAI subscription model");
 	}
 
 	return choices;
@@ -83,5 +71,6 @@ export function resolveModel(ctx: ExtensionContext, purpose: ModelPurpose): Mode
 
 export function formatModelChoice(choice: ModelChoice | undefined): string {
 	if (!choice) return "none";
-	return `${choice.model.provider}/${choice.model.id} (${choice.reason})`;
+	const provider = choice.model.provider === OPENAI_SUBSCRIPTION_PROVIDER ? "openai subscription" : choice.model.provider;
+	return `${provider}/${choice.model.id} (${choice.reason})`;
 }

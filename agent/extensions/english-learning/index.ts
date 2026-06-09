@@ -9,6 +9,7 @@ import {
 } from "./src/actions/translate-last.ts";
 import { COMMAND_NAME, EXTENSION_ID, TRANSLATE_KEY } from "./src/core/config.ts";
 import { formatModelChoice, resolveModel } from "./src/core/model-resolver.ts";
+import { clearTranslationCache, getTranslationCacheStats } from "./src/core/translation-cache.ts";
 import { describeKeyInput, isTranslateToggleKey, isTranslateToggleKeyPress } from "./src/platform/keys.ts";
 import { EnglishEditorBridge } from "./src/ui/editor-bridge.ts";
 
@@ -57,11 +58,13 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "status") {
+				const cache = getTranslationCacheStats();
 				ctx.ui.notify(
 					[
 						`English learning ${isTranslationOverlayOpen() ? "translation overlay open" : "ready"}.`,
 						`Rewrite model: ${formatModelChoice(resolveModel(ctx, "rewrite"))}`,
 						`Translate model: ${formatModelChoice(resolveModel(ctx, "translate"))}`,
+						`Translation cache: ${cache.size}/${cache.maxSize}`,
 					].join("\n"),
 					"info",
 				);
@@ -74,13 +77,18 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("English learning operations cancelled.", "info");
 				return;
 			}
+			if (sub === "clear-cache") {
+				clearTranslationCache();
+				ctx.ui.notify("English learning translation cache cleared.", "info");
+				return;
+			}
 			if (sub === "debug-keys") {
 				debugKeysUntil = Date.now() + 10_000;
 				ctx.ui.notify("Key debug on for 10s. Press Command+Shift+M now.", "info");
 				return;
 			}
 			ctx.ui.notify(
-				"Usage: /english status, /english translate [--force], /english cancel, /english debug-keys",
+				"Usage: /english status, /english translate [--force], /english cancel, /english clear-cache, /english debug-keys",
 				"info",
 			);
 		},
