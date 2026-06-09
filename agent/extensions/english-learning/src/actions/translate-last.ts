@@ -3,7 +3,7 @@ import { streamSimple, type UserMessage } from "@earendil-works/pi-ai";
 import { MAX_TRANSLATE_CHARS, TRANSLATE_TIMEOUT_MS } from "../core/config.ts";
 import { getLastAssistantText } from "../core/last-assistant.ts";
 import { segmentMarkdown } from "../core/markdown-segments.ts";
-import { formatModelChoice, resolveModelCandidates } from "../core/model-resolver.ts";
+import { resolveModelCandidates } from "../core/model-resolver.ts";
 import { buildTranslateUserPrompt, TRANSLATE_SYSTEM_PROMPT } from "../core/prompts.ts";
 import { SegmentTranslationParser } from "../core/stream-protocol.ts";
 import { estimateMaxTokensFromChars, isLikelyEnglish, textFromContent } from "../core/text-utils.ts";
@@ -22,6 +22,10 @@ interface ResolvedAuth {
 }
 
 let activeOverlay: ActiveOverlay | undefined;
+
+function formatOverlayModelLabel(choice: ModelChoice): string {
+	return `(${choice.model.provider}) ${choice.model.id}`;
+}
 
 export function isTranslationOverlayOpen(): boolean {
 	return activeOverlay !== undefined;
@@ -91,7 +95,7 @@ export async function openOrToggleTranslation(
 			(tui, theme, _keybindings, done) => {
 				overlay = new TranslationOverlay(tui, theme, segmentation.segments, {
 					modelLabel: candidates[0]
-						? `${candidates[0].model.provider}/${candidates[0].model.id}`
+						? formatOverlayModelLabel(candidates[0])
 						: "none needed",
 					translatableCount: segmentation.translatableCount,
 					codeBlockCount: segmentation.codeBlockCount,
@@ -149,6 +153,7 @@ async function runSegmentedTranslation(
 	for (let i = 0; i < candidates.length; i++) {
 		const choice = candidates[i]!;
 		if (signal.aborted || overlay.isClosed()) return;
+		overlay.setModelLabel(formatOverlayModelLabel(choice));
 
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(choice.model);
 		if (!auth.ok) {
@@ -158,13 +163,13 @@ async function runSegmentedTranslation(
 
 		overlay.setRunStatus(
 			"streaming",
-			`Streaming segmented translation with ${choice.model.provider}/${choice.model.id} (${i + 1}/${candidates.length})...`,
+			`Streaming translation... (${i + 1}/${candidates.length})`,
 		);
 
 		const before = hasAnyTranslatedText(segments);
 		try {
 			await runSingleModelTranslation(overlay, segments, choice, auth, userMessage, promptText, signal);
-			overlay.setRunStatus("done", `Done · ${formatModelChoice(choice)}`);
+			overlay.setRunStatus("done", "Done");
 			return;
 		} catch (error) {
 			if (signal.aborted || overlay.isClosed()) {
@@ -186,7 +191,7 @@ async function runSegmentedTranslation(
 			if (next) {
 				overlay.setRunStatus(
 					"streaming",
-					`${choice.model.provider}/${choice.model.id} failed (${shortError(message)}). Trying ${next.model.provider}/${next.model.id}...`,
+					`Failed (${shortError(message)}). Trying next model...`,
 				);
 			}
 		}

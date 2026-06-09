@@ -5,7 +5,6 @@ import {
 	truncateToWidth,
 	type Component,
 	type TUI,
-	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type {
 	TranslatableSegment,
@@ -15,9 +14,71 @@ import type {
 } from "../types.ts";
 import { isTranslateToggleKey, isTranslateToggleKeyPress } from "../platform/keys.ts";
 import { enableMouseWheel, parseWheelInput } from "../platform/mouse.ts";
-import { clamp, padTo, prefixWrapped, wrapBlock } from "./ui-utils.ts";
+import { clamp, padTo, wrapBlock } from "./ui-utils.ts";
 
 export type OverlayRunStatus = "idle" | "streaming" | "done" | "aborted" | "error";
+
+type BlockTone = "original" | "translation" | "code" | "error";
+
+const RESET_FG = "\x1b[39m";
+const RESET_BG = "\x1b[49m";
+const HEADER_ROWS = 5;
+const FOOTER_ROWS = 1;
+
+function ansiFg(theme: Theme, truecolor: string, fallback256: number): string {
+	return theme.getColorMode() === "truecolor"
+		? truecolor
+		: `\x1b[38;5;${fallback256}m`;
+}
+
+function ansiBg(theme: Theme, truecolor: string, fallback256: number): string {
+	return theme.getColorMode() === "truecolor"
+		? truecolor
+		: `\x1b[48;5;${fallback256}m`;
+}
+
+function blockBg(theme: Theme, tone: BlockTone, text: string): string {
+	const bg =
+		tone === "translation"
+			? ansiBg(theme, "\x1b[48;2;218;246;231m", 194)
+			: tone === "code"
+				? ansiBg(theme, "\x1b[48;2;242;237;250m", 189)
+				: tone === "error"
+					? ansiBg(theme, "\x1b[48;2;255;226;226m", 224)
+					: ansiBg(theme, "\x1b[48;2;255;232;226m", 224);
+	return `${bg}${text}${RESET_BG}`;
+}
+
+function rail(theme: Theme, tone: BlockTone, text: string): string {
+	const fg =
+		tone === "translation"
+			? ansiFg(theme, "\x1b[38;2;20;132;79m", 28)
+			: tone === "code"
+				? ansiFg(theme, "\x1b[38;2;100;82;150m", 97)
+				: ansiFg(theme, "\x1b[38;2;205;48;65m", 160);
+	return `${fg}${theme.bold(text)}${RESET_FG}`;
+}
+
+function blockText(theme: Theme, tone: BlockTone, text: string): string {
+	if (tone === "error") {
+		return `${ansiFg(theme, "\x1b[38;2;185;28;28m", 160)}${text}${RESET_FG}`;
+	}
+	if (tone === "translation") {
+		return `${ansiFg(theme, "\x1b[38;2;20;70;47m", 29)}${text}${RESET_FG}`;
+	}
+	if (tone === "code") {
+		return `${ansiFg(theme, "\x1b[38;2;48;105;68m", 29)}${text}${RESET_FG}`;
+	}
+	return `${ansiFg(theme, "\x1b[38;2;31;41;55m", 235)}${text}${RESET_FG}`;
+}
+
+function titleText(theme: Theme, tone: BlockTone, text: string): string {
+	return rail(theme, tone, theme.bold(text));
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+	return `${count} ${count === 1 ? singular : pluralForm}`;
+}
 
 export class TranslationOverlay implements Component {
 	private scroll = 0;
@@ -27,6 +88,7 @@ export class TranslationOverlay implements Component {
 	private closed = false;
 	private cachedWidth = 0;
 	private cachedContent: string[] = [];
+	private modelLabel: string;
 	private readonly disableMouse: () => void;
 
 	constructor(
@@ -41,11 +103,18 @@ export class TranslationOverlay implements Component {
 			onClose: () => void;
 		},
 	) {
+		this.modelLabel = options.modelLabel;
 		this.disableMouse = enableMouseWheel(tui.terminal);
 	}
 
 	isClosed(): boolean {
 		return this.closed;
+	}
+
+	setModelLabel(label: string): void {
+		if (!label || label === this.modelLabel) return;
+		this.modelLabel = label;
+		this.tui.requestRender();
 	}
 
 	setRunStatus(status: OverlayRunStatus, text?: string): void {
@@ -139,37 +208,38 @@ export class TranslationOverlay implements Component {
 	}
 
 	render(width: number): string[] {
-		const th = this.theme;
 		const W = Math.max(60, width);
-		const innerW = W - 2;
 		const body = this.bodyRows();
-		const content = this.getContent(innerW);
+		const content = this.getContent(W);
 		const maxScroll = Math.max(0, content.length - body);
 		this.scroll = clamp(this.scroll, 0, maxScroll);
-		const border = (s: string) => th.fg("border", s);
-		const title = ` English Learning · Translate · ${this.options.translatableCount} text segment${this.options.translatableCount === 1 ? "" : "s"} · ${this.options.codeBlockCount} code block${this.options.codeBlockCount === 1 ? "" : "s"} shown `;
-		const model = ` Model: ${this.options.modelLabel} `;
-		const progress = ` ${this.progressLabel()} · ${this.statusText} `;
-		const help = " Esc/Cmd+Shift+M close · ↑↓/touchpad scroll · PgUp/PgDn page · g/G top/bottom · f follow ";
-		const lines: string[] = [];
+		const lines: string[] = [...this.renderHeader(W)];
 
-		lines.push(border("╭") + border("─".repeat(innerW)) + border("╮"));
-		lines.push(border("│") + th.fg("toolTitle", th.bold(padTo(title, innerW))) + border("│"));
-		lines.push(border("│") + th.fg("muted", padTo(model, innerW)) + border("│"));
-		lines.push(border("│") + this.statusLine(progress, innerW) + border("│"));
-		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
 		for (let row = 0; row < body; row++) {
-			lines.push(border("│") + padTo(content[this.scroll + row] ?? "", innerW) + border("│"));
+			lines.push(padTo(content[this.scroll + row] ?? "", W));
 		}
-		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
-		lines.push(border("│") + th.fg("dim", padTo(help, innerW)) + border("│"));
-		lines.push(border("╰") + border("─".repeat(innerW)) + border("╯"));
+
+		lines.push(this.renderFooter(W));
 		return lines.map((line) => truncateToWidth(line, W, ""));
 	}
 
-	private statusLine(text: string, width: number): string {
+	private renderHeader(width: number): string[] {
 		const th = this.theme;
-		const color =
+		const innerW = width - 2;
+		const border = (s: string) => th.fg("borderAccent", s);
+		const cell = (content: string) =>
+			border("│") + padTo(` ${content}`, innerW) + border("│");
+		const progressIcon =
+			this.runStatus === "done"
+				? "✓"
+				: this.runStatus === "error"
+					? "!"
+					: this.runStatus === "aborted"
+						? "×"
+						: this.runStatus === "streaming"
+							? "↻"
+							: "…";
+		const statusColor =
 			this.runStatus === "error"
 				? "error"
 				: this.runStatus === "aborted"
@@ -177,7 +247,28 @@ export class TranslationOverlay implements Component {
 					: this.runStatus === "done"
 						? "success"
 						: "accent";
-		return th.fg(color, padTo(text, width));
+		const title = th.fg("toolTitle", th.bold("Translate")) + th.fg("muted", " · Last assistant response");
+		const codeSummary = this.options.codeBlockCount > 0
+			? `</> ${plural(this.options.codeBlockCount, "code block")} shown once`
+			: "</> 0 code blocks";
+		const summary = th.fg(
+			statusColor,
+			`${progressIcon} ${this.progressLabel()} · ¶ ${plural(this.options.translatableCount, "text segment")}`,
+		) + th.fg("muted", ` · ${codeSummary}`);
+		const model = th.fg("muted", "Model: ") + th.fg("accent", this.modelLabel) + th.fg("muted", ` · ${this.statusText}`);
+
+		return [
+			border("╭") + border("─".repeat(innerW)) + border("╮"),
+			cell(title),
+			cell(summary),
+			cell(model),
+			border("╰") + border("─".repeat(innerW)) + border("╯"),
+		];
+	}
+
+	private renderFooter(width: number): string {
+		const help = " Esc/Cmd⇧M close · ↑↓/touchpad scroll · PgUp/PgDn · g/G · f follow ";
+		return this.theme.fg("dim", padTo(help, width));
 	}
 
 	private progressLabel(): string {
@@ -188,7 +279,7 @@ export class TranslationOverlay implements Component {
 	}
 
 	private bodyRows(): number {
-		return Math.max(4, this.tui.terminal.rows - 8);
+		return Math.max(4, this.tui.terminal.rows - HEADER_ROWS - FOOTER_ROWS);
 	}
 
 	private findTranslatable(id: number): TranslatableSegment | undefined {
@@ -219,7 +310,7 @@ export class TranslationOverlay implements Component {
 		if (this.cachedWidth === width && this.cachedContent.length > 0) return this.cachedContent;
 		const lines: string[] = [];
 		for (const segment of this.segments) {
-			if (lines.length > 0) lines.push(this.theme.fg("borderMuted", "─".repeat(width)));
+			if (lines.length > 0) lines.push("");
 			this.renderSegment(lines, segment, width);
 		}
 		if (lines.length === 0) lines.push(this.theme.fg("muted", padTo(" No assistant text to translate.", width)));
@@ -229,32 +320,68 @@ export class TranslationOverlay implements Component {
 	}
 
 	private renderSegment(lines: string[], segment: TranslationSegment, width: number): void {
-		const th = this.theme;
-		const label = ` ${segment.id}/${this.segments.length} ${segment.kind}${segment.kind === "code" && segment.language ? ` · ${segment.language}` : ""} `;
-		lines.push(th.fg("accent", th.bold(padTo(label, width))));
-
 		if (!segment.translatable) {
-			for (const raw of segment.source.split("\n")) {
-				lines.push(th.fg("mdCodeBlock", padTo(`  ${truncateToWidth(raw, Math.max(1, width - 2), "…")}`, width)));
-			}
-			lines.push(th.fg("dim", padTo("  ↳ code block shown only, not translated", width)));
+			this.renderCodeBlock(lines, segment.source, width);
 			return;
 		}
 
-		lines.push(...prefixWrapped("EN  ", segment.source, width, (line) => th.fg("toolDiffContext", line)));
+		this.renderTextBlock(lines, "Original", segment.source, width, "original");
 
-		const translation = segment.translation.trimEnd();
-		if (translation) {
-			lines.push(...prefixWrapped("中文 ", translation, width, (line) => th.fg("success", line)));
-		} else if (segment.status === "pending") {
-			lines.push(th.fg("dim", padTo("中文 …", width)));
-		} else if (segment.status === "error") {
-			lines.push(th.fg("error", padTo(`中文 Error: ${segment.error ?? "translation failed"}`, width)));
+		if (segment.status === "error") {
+			this.renderTextBlock(
+				lines,
+				"Translation",
+				`Error: ${segment.error ?? "translation failed"}`,
+				width,
+				"error",
+			);
+			return;
 		}
 
-		if (segment.status === "streaming") {
-			const suffix = visibleWidth(translation) > 0 ? "  ▌" : "中文 ▌";
-			if (!translation) lines.push(th.fg("accent", padTo(suffix, width)));
+		const translation = segment.translation.trimEnd();
+		const showCursor = segment.status === "streaming";
+		const targetText = translation
+			? `${translation}${showCursor ? " ▌" : ""}`
+			: showCursor
+				? "▌"
+				: "…";
+		this.renderTextBlock(lines, "Translation", targetText, width, "translation");
+	}
+
+	private renderTextBlock(
+		lines: string[],
+		label: string,
+		text: string,
+		width: number,
+		tone: BlockTone,
+	): void {
+		lines.push(this.renderBlockLine(label, width, tone, { title: true }));
+		for (const wrapped of wrapBlock(text, Math.max(1, width - 2))) {
+			lines.push(this.renderBlockLine(wrapped, width, tone));
+		}
+	}
+
+	private renderBlockLine(
+		content: string,
+		width: number,
+		tone: BlockTone,
+		options: { title?: boolean } = {},
+	): string {
+		const prefix = "▌ ";
+		const styled =
+			rail(this.theme, tone, prefix) +
+			(options.title ? titleText(this.theme, tone, content) : blockText(this.theme, tone, content));
+		return blockBg(this.theme, tone, padTo(styled, width));
+	}
+
+	private renderCodeBlock(lines: string[], source: string, width: number): void {
+		lines.push(this.renderBlockLine("Code shown once", width, "code", { title: true }));
+		const prefix = "  ";
+		const contentWidth = Math.max(1, width - prefix.length);
+		for (const raw of source.split("\n")) {
+			const content = truncateToWidth(raw, contentWidth, "…");
+			const styled = blockText(this.theme, "code", `${prefix}${content}`);
+			lines.push(blockBg(this.theme, "code", padTo(styled, width)));
 		}
 	}
 }

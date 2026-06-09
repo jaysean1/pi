@@ -11,11 +11,13 @@ A Pi TUI extension for English learning.
 
 ## Translation view
 
-The overlay shows the assistant response in original order as learning cards:
+The overlay shows the assistant response in original order as a compact comparison view with a bordered status header:
 
-- Text segments show `EN` followed by `中文` translation.
-- Markdown code blocks remain visible in place but are not sent to the model and are not translated.
-- Translation streams into the matching segment when the model emits tagged output.
+- The header shows translation progress, text/code segment counts, current status, and the model channel as `(provider) model`.
+- Original text appears in `Original` blocks with a warm background and left rail.
+- Chinese translation appears in `Translation` blocks with a green background and left rail.
+- Markdown code blocks appear once in `Code shown once` blocks; they are not sent to the model and are not translated.
+- Translation streams into the matching `Translation` blocks when the model emits tagged output.
 - `Esc` or `Command+Shift+M` closes the overlay. Closing while streaming cancels the model request.
 - Scroll with `↑/↓`, `PgUp/PgDn`, `g/G`, or touchpad/mouse wheel when the terminal supports mouse reporting.
 - Press `f` to resume auto-follow after manually scrolling.
