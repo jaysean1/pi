@@ -21,6 +21,34 @@ import { fetchTweet, type Tweet, type TweetThread } from "./twitter-cli.ts";
 type ActionStatus = { kind: "info" | "error"; message: string };
 export type OpenTweetExternal = (tweet: Tweet) => Promise<void>;
 
+const OPEN_EXTERNAL_TIMEOUT_MS = 8_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			reject(new Error(`timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		timer.unref?.();
+		promise.then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
+
 function stripAnsi(s: string): string {
 	let out = "";
 	let inEsc = false;
@@ -120,7 +148,10 @@ export class TweetDetailOverlay implements Component, Focusable {
 		this.openingExternal = true;
 		this.actionStatus = { kind: "info", message: "opening detail…" };
 		this.tui.requestRender();
-		void this.openExternal(this.thread.tweet)
+		void withTimeout(
+			this.openExternal(this.thread.tweet),
+			OPEN_EXTERNAL_TIMEOUT_MS,
+		)
 			.then(() => {
 				if (this.disposed) return;
 				this.actionStatus = { kind: "info", message: "opened detail" };

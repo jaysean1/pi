@@ -8,6 +8,7 @@
 // statusline never throws into the session.
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -36,6 +37,19 @@ const WIDGET_KEY = "twitter-statusline";
 const ROTATE_MS = 30_000;
 const REFRESH_MS = 30_000;
 const CHROME_BUNDLE_ID = "com.google.Chrome";
+const X_CHROME_WEB_APP_ID = "lodlkdfmihgonocnmddehnfgiljnadcf";
+const X_CHROME_APP_BUNDLE_ID = `com.google.Chrome.app.${X_CHROME_WEB_APP_ID}`;
+const X_CHROME_APP_PATHS = [
+	`${process.env.HOME ?? ""}/Applications/Chrome Apps.localized/X.app`,
+	"/Applications/Chrome Apps.localized/X.app",
+];
+const CHROME_EXECUTABLE_PATHS = [
+	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	`${process.env.HOME ?? ""}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+];
+const X_CHROME_APP_OPEN_TIMEOUT_MS = 3_000;
+const CHROME_SCRIPT_TIMEOUT_MS = 2_500;
+const CHROME_OPEN_TIMEOUT_MS = 3_000;
 
 interface Store {
 	tweets: Tweet[];
@@ -43,6 +57,16 @@ interface Store {
 	fetchedMs: number;
 	loading: boolean;
 	lastError: string | undefined;
+}
+
+interface ChromeTabTarget {
+	windowId: string;
+	tabId: string;
+}
+
+interface XChromeAppSnapshot {
+	windowIds: string[];
+	bounds: [string, string, string, string] | undefined;
 }
 
 export default function twitterStatusline(pi: ExtensionAPI) {
@@ -60,6 +84,7 @@ export default function twitterStatusline(pi: ExtensionAPI) {
 	let rotateTimer: ReturnType<typeof setInterval> | undefined;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let overlayBusy = false;
+	let chromeTabTarget: ChromeTabTarget | undefined;
 
 	// --- data ----------------------------------------------------------------
 
@@ -75,69 +100,319 @@ export default function twitterStatusline(pi: ExtensionAPI) {
 		return `https://x.com/i/web/status/${encodeURIComponent(tweet.id)}`;
 	}
 
-	function openWithLabel(label: string, args: string[]): Promise<void> {
+	function errorDetail(
+		label: string,
+		error: Error & { killed?: boolean; signal?: string | null },
+		stderr: string | Buffer | undefined,
+		timeoutMs: number,
+	): Error {
+		if (
+			error.killed ||
+			error.signal === "SIGTERM" ||
+			error.signal === "SIGKILL"
+		) {
+			return new Error(`${label}: timed out after ${timeoutMs}ms`);
+		}
+		const detail = stderr?.toString().trim() || error.message;
+		return new Error(`${label}: ${detail}`);
+	}
+
+	function runCommand(
+		label: string,
+		command: string,
+		args: string[],
+		timeoutMs: number,
+	): Promise<string> {
 		return new Promise((resolve, reject) => {
-			execFile("open", args, (error, _stdout, stderr) => {
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const child = execFile(command, args, (error, stdout, stderr) => {
+				if (settled) return;
+				settled = true;
+				if (timer) clearTimeout(timer);
 				if (!error) {
-					resolve();
+					resolve(stdout?.toString() ?? "");
 					return;
 				}
-				const detail = stderr?.toString().trim() || error.message;
-				reject(new Error(`${label}: ${detail}`));
+				reject(errorDetail(label, error, stderr, timeoutMs));
 			});
+			timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				child.kill("SIGKILL");
+				reject(new Error(`${label}: timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
+			timer.unref?.();
 		});
 	}
 
-	// Reuse an already-open x.com / twitter.com tab in the running Chrome and
-	// navigate it to the tweet (then focus its window), so pressing Enter again
-	// reuses the same tab instead of opening a new window. Chrome PWA/app-mode
-	// windows cannot be driven by AppleScript, so we deliberately target a normal
-	// browser tab. The URL is passed as an argv item to avoid any quoting issues.
-	function openTweetInChromeTab(url: string): Promise<void> {
+	function openWithLabel(
+		label: string,
+		args: string[],
+		timeoutMs = CHROME_OPEN_TIMEOUT_MS,
+	): Promise<void> {
+		return runCommand(label, "open", args, timeoutMs).then(() => undefined);
+	}
+
+	function runAppleScript(
+		label: string,
+		script: string,
+		args: string[],
+		timeoutMs = CHROME_SCRIPT_TIMEOUT_MS,
+	): Promise<string> {
+		return runCommand(label, "osascript", ["-e", script, ...args], timeoutMs);
+	}
+
+	function parseChromeTabTarget(stdout: string): ChromeTabTarget | undefined {
+		const line = stdout
+			.split(/\r?\n/)
+			.find((entry) => entry.startsWith("PI_TWITTER_TAB\t"));
+		if (!line) return undefined;
+		const [, windowId, tabId] = line.split("\t");
+		if (!windowId || !tabId) return undefined;
+		return { windowId, tabId };
+	}
+
+	function xChromeAppPath(): string | undefined {
+		return X_CHROME_APP_PATHS.find(
+			(candidate) => candidate && existsSync(candidate),
+		);
+	}
+
+	function chromeExecutablePath(): string | undefined {
+		return CHROME_EXECUTABLE_PATHS.find(
+			(candidate) => candidate && existsSync(candidate),
+		);
+	}
+
+	function parseXChromeAppSnapshot(
+		stdout: string,
+	): XChromeAppSnapshot | undefined {
+		const line = stdout
+			.split(/\r?\n/)
+			.find((entry) => entry.startsWith("PI_X_APP\t"));
+		if (!line) return undefined;
+		const [, idsText, left, top, right, bottom] = line.split("\t");
+		const windowIds = idsText.split("|").filter(Boolean);
+		const bounds =
+			left && top && right && bottom
+				? ([left, top, right, bottom] as [string, string, string, string])
+				: undefined;
+		return { windowIds, bounds };
+	}
+
+	async function snapshotXChromeApp(): Promise<XChromeAppSnapshot> {
+		const script = `set sep to ASCII character 9
+set idsText to ""
+set leftText to ""
+set topText to ""
+set rightText to ""
+set bottomText to ""
+tell application id "${X_CHROME_APP_BUNDLE_ID}"
+  repeat with w in windows
+    set idsText to idsText & "|" & ((id of w) as text)
+  end repeat
+  if (count of windows) > 0 then
+    try
+      set b to bounds of front window
+      set leftText to (item 1 of b) as text
+      set topText to (item 2 of b) as text
+      set rightText to (item 3 of b) as text
+      set bottomText to (item 4 of b) as text
+    end try
+  end if
+end tell
+return "PI_X_APP" & sep & idsText & sep & leftText & sep & topText & sep & rightText & sep & bottomText`;
+		const stdout = await runAppleScript("X Chrome app snapshot", script, []);
+		return parseXChromeAppSnapshot(stdout) ?? { windowIds: [], bounds: undefined };
+	}
+
+	async function activateXChromeApp(appPath: string): Promise<void> {
+		try {
+			await openWithLabel(
+				"X Chrome app activate",
+				["-b", X_CHROME_APP_BUNDLE_ID],
+				X_CHROME_APP_OPEN_TIMEOUT_MS,
+			);
+			return;
+		} catch {
+			await openWithLabel(
+				"X Chrome app path activate",
+				["-a", appPath],
+				X_CHROME_APP_OPEN_TIMEOUT_MS,
+			);
+		}
+	}
+
+	async function cleanupXChromeAppWindows(
+		snapshot: XChromeAppSnapshot,
+	): Promise<void> {
+		const [left = "", top = "", right = "", bottom = ""] =
+			snapshot.bounds ?? [];
+		const script = `on run argv
+  set oldIds to item 1 of argv
+  set leftText to item 2 of argv
+  set topText to item 3 of argv
+  set rightText to item 4 of argv
+  set bottomText to item 5 of argv
+  tell application id "${X_CHROME_APP_BUNDLE_ID}"
+    activate
+    delay 0.6
+    if (count of windows) is 0 then return
+    set keepId to (id of front window) as text
+    if leftText is not "" and topText is not "" and rightText is not "" and bottomText is not "" then
+      try
+        set bounds of front window to {leftText as integer, topText as integer, rightText as integer, bottomText as integer}
+      end try
+    end if
+    set n to count of windows
+    repeat with i from n to 1 by -1
+      try
+        set w to window i
+        set wid to (id of w) as text
+        if wid is not keepId and oldIds contains ("|" & wid & "|") then close w
+      end try
+    end repeat
+  end tell
+end run`;
+		await runAppleScript("X Chrome app cleanup", script, [
+			`|${snapshot.windowIds.join("|")}|`,
+			left,
+			top,
+			right,
+			bottom,
+		]);
+	}
+
+	// Prefer the installed X Chrome App / PWA. macOS LaunchServices can launch the
+	// shim but ignores document URLs for Chrome PWAs, so we launch the installed
+	// app and then ask the running Chrome session to open the app id with an
+	// override URL. Chrome may create a fresh app window for that launch; when it
+	// does, we close this extension's previous X app windows so the app behaves as
+	// a single reusable detail surface instead of accumulating windows.
+	async function openTweetInXChromeApp(url: string): Promise<void> {
+		const appPath = xChromeAppPath();
+		if (!appPath) {
+			throw new Error("X Chrome app is not installed");
+		}
+		const chromePath = chromeExecutablePath();
+		if (!chromePath) {
+			throw new Error("Google Chrome executable was not found");
+		}
+
+		const snapshot = await snapshotXChromeApp().catch(() => ({
+			windowIds: [],
+			bounds: undefined,
+		}));
+		await activateXChromeApp(appPath);
+		await runCommand(
+			"X Chrome app detail",
+			chromePath,
+			[
+				`--app-id=${X_CHROME_WEB_APP_ID}`,
+				`--app-launch-url-for-shortcuts-menu-item=${url}`,
+			],
+			X_CHROME_APP_OPEN_TIMEOUT_MS,
+		);
+		await cleanupXChromeAppWindows(snapshot).catch(() => undefined);
+	}
+
+	// Open the tweet in a visible Chrome tab. We first reuse the tab previously
+	// opened by this extension. If that tab was lost (or pi was reloaded), we scan
+	// all Chrome windows for an existing x.com/twitter.com tab and reuse it. Only
+	// when no Twitter tab exists do we create a new tab in the front Chrome window.
+	function openTweetInChromeTab(
+		url: string,
+		tweetId: string,
+		previous: ChromeTabTarget | undefined,
+	): Promise<ChromeTabTarget> {
 		const script = `on run argv
   set tweetURL to item 1 of argv
+  set expectedTweetId to item 2 of argv
+  set expectedWindowId to item 3 of argv
+  set expectedTabId to item 4 of argv
+  set sep to ASCII character 9
   tell application "Google Chrome"
-    if (count of windows) is 0 then
-      make new window
-      set URL of active tab of front window to tweetURL
-      activate
-      return
+    activate
+    if (count of windows) is 0 then make new window
+
+    set targetWindow to missing value
+    set targetTab to missing value
+
+    if expectedWindowId is not "" and expectedTabId is not "" then
+      repeat with w in windows
+        if ((id of w) as text) is expectedWindowId then
+          repeat with t in tabs of w
+            if ((id of t) as text) is expectedTabId then
+              set targetWindow to w
+              set targetTab to t
+              exit repeat
+            end if
+          end repeat
+        end if
+        if targetTab is not missing value then exit repeat
+      end repeat
     end if
-    set reused to false
-    repeat with w in windows
+
+    if targetTab is missing value then
+      repeat with w in windows
+        set ti to 0
+        repeat with t in tabs of w
+          set ti to ti + 1
+          try
+            set u to URL of t
+          on error
+            set u to ""
+          end try
+          if u contains "x.com/" or u contains "twitter.com/" then
+            set targetWindow to w
+            set targetTab to t
+            set active tab index of w to ti
+            exit repeat
+          end if
+        end repeat
+        if targetTab is not missing value then exit repeat
+      end repeat
+    end if
+
+    if targetTab is missing value then
+      set targetWindow to front window
+      tell targetWindow
+        make new tab with properties {URL:tweetURL}
+        set active tab index to (count of tabs)
+        set targetTab to active tab
+      end tell
+    else
+      set URL of targetTab to tweetURL
       set ti to 0
-      repeat with t in tabs of w
+      repeat with t in tabs of targetWindow
         set ti to ti + 1
-        set u to (URL of t)
-        if u contains "x.com/" or u contains "twitter.com/" then
-          set URL of t to tweetURL
-          set active tab index of w to ti
-          set index of w to 1
-          set reused to true
+        if ((id of t) as text) is ((id of targetTab) as text) then
+          set active tab index of targetWindow to ti
           exit repeat
         end if
       end repeat
-      if reused then exit repeat
-    end repeat
-    if not reused then
-      tell front window
-        make new tab with properties {URL:tweetURL}
-        set active tab index to (count of tabs)
-      end tell
-      set index of front window to 1
     end if
+
+    set minimized of targetWindow to false
+    set visible of targetWindow to true
+    set index of targetWindow to 1
     activate
+
+    return "PI_TWITTER_TAB" & sep & ((id of targetWindow) as text) & sep & ((id of targetTab) as text) & sep & (URL of targetTab)
   end tell
 end run`;
-		return new Promise((resolve, reject) => {
-			execFile("osascript", ["-e", script, url], (error, _stdout, stderr) => {
-				if (!error) {
-					resolve();
-					return;
-				}
-				const detail = stderr?.toString().trim() || error.message;
-				reject(new Error(`Chrome tab: ${detail}`));
-			});
+		return runAppleScript("Chrome tab", script, [
+			url,
+			tweetId,
+			previous?.windowId ?? "",
+			previous?.tabId ?? "",
+		]).then((stdout) => {
+			const target = parseChromeTabTarget(stdout);
+			if (!target) {
+				throw new Error("Chrome tab: missing target tab in AppleScript result");
+			}
+			return target;
 		});
 	}
 
@@ -145,18 +420,48 @@ end run`;
 		const url = tweetUrl(tweet);
 		const errors: string[] = [];
 
-		// Primary: navigate an existing x.com tab (or open one new tab) and focus
-		// it — repeated opens reuse the same tab rather than spawning new windows.
+		// Primary: open the detail URL in the installed X Chrome App/PWA. If it is
+		// already running, LaunchServices should route the URL to that app instance
+		// instead of opening another normal Chrome browser tab.
 		try {
-			await openTweetInChromeTab(url);
+			await openTweetInXChromeApp(url);
 			return;
 		} catch (error) {
 			errors.push(error instanceof Error ? error.message : String(error));
 		}
 
-		// Fallback: let macOS hand the URL to Chrome (a normal tab, no reuse).
+		// Fallback 1: normal Chrome browser, but still reuse a controlled Twitter tab
+		// whenever AppleScript is available. Only this layer may create one browser
+		// tab, and future opens should navigate that same tab in place.
 		try {
-			await openWithLabel("Google Chrome", ["-b", CHROME_BUNDLE_ID, url]);
+			chromeTabTarget = await openTweetInChromeTab(
+				url,
+				tweet.id,
+				chromeTabTarget,
+			);
+			return;
+		} catch (error) {
+			chromeTabTarget = undefined;
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
+
+		// Fallback 2: force Chrome to open the exact URL. This may create a normal
+		// tab, so keep it as the last resort after the app and reusable-tab paths.
+		try {
+			await openWithLabel("Google Chrome URL", ["-b", CHROME_BUNDLE_ID, url]);
+			return;
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
+
+		// Fallback 3: bundle id lookup can fail on unusual installs; app name is less
+		// precise but often succeeds for a manually installed Chrome.app.
+		try {
+			await openWithLabel("Google Chrome app URL", [
+				"-a",
+				"Google Chrome",
+				url,
+			]);
 			return;
 		} catch (error) {
 			errors.push(error instanceof Error ? error.message : String(error));

@@ -45,15 +45,16 @@ credential handling is needed. Verify with `twitter whoami`.
   while the preview is focused. After 10 minutes without a successful refresh the
   bar shows `(stale)`.
 - **View** → read-only overlay of the current tweet + replies (`twitter tweet`).
-- **View action**: press **Enter** to open the tweet in **Google Chrome**, reusing
-  an already-open tab. Via AppleScript it looks for an existing `x.com` /
-  `twitter.com` tab in any running Chrome window, navigates that tab to the tweet
-  and focuses its window; if none exists it opens a single new tab in the front
-  window. Pressing **Enter** on another tweet reuses the same tab — it never piles
-  up new windows. (Chrome's installed **X** PWA / app-mode windows can't be
-  scripted or reliably reused from the command line, so a normal browser tab is
-  used instead.) Falls back to `open -b com.google.Chrome <url>` (a plain tab, no
-  reuse) if the AppleScript path fails.
+- **View action**: press **Enter** to open the tweet detail externally. It first
+  targets the installed Chrome **X.app** PWA
+  (`~/Applications/Chrome Apps.localized/X.app`). Because macOS LaunchServices
+  launches Chrome PWAs but ignores the URL argument, the extension invokes Chrome
+  with the X app id and the detail URL, then closes the previous X app window so
+  repeated opens behave like one reusable app surface. If the X app path or Chrome
+  app-launch path is unavailable, it falls back to a normal Google Chrome tab:
+  AppleScript reuses this extension's previous tab, then an existing `x.com` /
+  `twitter.com` tab, and only creates a tab if none exists. The final last-resort
+  fallback is `open -b com.google.Chrome <url>`.
 - **All** → full-screen, scrollable list of the cached hot tweets; `Enter` opens
   a tweet's detail, **r** refreshes recent hot tweets, `Esc` returns to the list.
 - Everything is best-effort: any CLI/network failure falls back to the previous
