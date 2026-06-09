@@ -1,12 +1,12 @@
 {
-  "defaultModel": "claude-opus-4-8",
-  "defaultProvider": "anthropic",
+  "defaultModel": "gpt-5.5",
+  "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "xhigh",
-  "lastChangelogVersion": "0.78.1",
+  "lastChangelogVersion": "0.79.0",
   "packages": [
     "npm:pi-web-access",
-    "extensions/rpiv-mono/packages/rpiv-ask-user-question",
-    "extensions/rpiv-mono/packages/rpiv-todo",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@juicesharp/rpiv-todo",
     "extensions/anthropic-subscription-prompt-cleaner",
     "/Users/jayseanqian/.vibe-island/pi-extension"
   ],

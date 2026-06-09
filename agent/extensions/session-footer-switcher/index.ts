@@ -410,13 +410,13 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	private renderNewSessionRow(width: number): string[] {
 		const th = this.theme;
 		const isSelected = this.selectedIndex === 0;
-		const content = "+  New session";
+		const content = "+ New session";
 		const cursorPlain = isSelected ? "›" : " ";
 		const placeholderPlain = `${" ".repeat(Math.max(0, this.sessionNumberWidth() - 2))}· `;
 		const prefixPlain = ` ${cursorPlain} ${placeholderPlain} `;
-		// Clamp against the computed grid prefix plus "[ label ]" chrome so the
+		// Clamp against the computed grid prefix plus "[label]" chrome so the
 		// button never overflows on narrow terminals.
-		const labelWidth = Math.max(1, width - visibleWidth(prefixPlain) - 4);
+		const labelWidth = Math.max(1, width - visibleWidth(prefixPlain) - 2);
 		const label = truncateToWidth(content, labelWidth, "...");
 
 		const borderColor = isSelected ? "accent" : "border";
@@ -426,7 +426,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		const cursor = isSelected ? th.fg("accent", "›") : " ";
 		const placeholder = th.fg("dim", placeholderPlain);
 
-		const row = ` ${cursor} ${placeholder} ${bracketL} ${labelStyled} ${bracketR}`;
+		const row = ` ${cursor} ${placeholder} ${bracketL}${labelStyled}${bracketR}`;
 		// When selected, paint a full-width highlight bar behind the row so the
 		// active entry reads as a solid selected band (mirrors the built-in
 		// session selector's `selectedBg` treatment).
