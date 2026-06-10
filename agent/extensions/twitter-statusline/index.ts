@@ -8,6 +8,8 @@
 // statusline never throws into the session.
 
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -38,6 +40,26 @@ const REFRESH_MS = 30_000;
 const CHROME_BUNDLE_ID = "com.google.Chrome";
 const CHROME_SCRIPT_TIMEOUT_MS = 2_500;
 const CHROME_OPEN_TIMEOUT_MS = 3_000;
+
+// --- config --------------------------------------------------------------
+
+interface TwitterStatuslineConfig {
+	chromeProfile?: string;
+}
+
+let configCache: TwitterStatuslineConfig | undefined;
+
+function loadConfig(): TwitterStatuslineConfig {
+	if (configCache) return configCache;
+	try {
+		const configPath = path.join(__dirname, "config.json");
+		const text = readFileSync(configPath, "utf8");
+		configCache = JSON.parse(text) as TwitterStatuslineConfig;
+	} catch {
+		configCache = {};
+	}
+	return configCache;
+}
 
 interface Store {
 	tweets: Tweet[];
@@ -164,12 +186,14 @@ export default function twitterStatusline(pi: ExtensionAPI) {
 		url: string,
 		tweetId: string,
 		previous: ChromeTabTarget | undefined,
+		profileDir: string | undefined,
 	): Promise<ChromeTabTarget> {
 		const script = `on run argv
   set tweetURL to item 1 of argv
   set expectedTweetId to item 2 of argv
   set expectedWindowId to item 3 of argv
   set expectedTabId to item 4 of argv
+  set profileDir to item 5 of argv
   set sep to ASCII character 9
   tell application "Google Chrome"
     activate
@@ -194,24 +218,49 @@ export default function twitterStatusline(pi: ExtensionAPI) {
     end if
 
     if targetTab is missing value then
-      repeat with w in windows
-        set ti to 0
-        repeat with t in tabs of w
-          set ti to ti + 1
-          try
-            set u to URL of t
-          on error
-            set u to ""
-          end try
-          if u contains "x.com/" or u contains "twitter.com/" then
-            set targetWindow to w
-            set targetTab to t
-            set active tab index of w to ti
-            exit repeat
-          end if
+      if profileDir is not "" then
+        -- Skip scanning all windows; open directly in the configured profile.
+        do shell script "open -a 'Google Chrome' --args --profile-directory=" & quoted form of profileDir & " " & quoted form of tweetURL
+        delay 0.5
+        repeat with w in windows
+          set ti to 0
+          repeat with t in tabs of w
+            set ti to ti + 1
+            try
+              set u to URL of t
+            on error
+              set u to ""
+            end try
+            if u is tweetURL then
+              set targetWindow to w
+              set targetTab to t
+              set active tab index of w to ti
+              exit repeat
+            end if
+          end repeat
+          if targetTab is not missing value then exit repeat
         end repeat
-        if targetTab is not missing value then exit repeat
-      end repeat
+      else
+        -- Fallback: scan all windows for any Twitter tab (original behavior).
+        repeat with w in windows
+          set ti to 0
+          repeat with t in tabs of w
+            set ti to ti + 1
+            try
+              set u to URL of t
+            on error
+              set u to ""
+            end try
+            if u contains "x.com/" or u contains "twitter.com/" then
+              set targetWindow to w
+              set targetTab to t
+              set active tab index of w to ti
+              exit repeat
+            end if
+          end repeat
+          if targetTab is not missing value then exit repeat
+        end repeat
+      end if
     end if
 
     if targetTab is missing value then
@@ -246,6 +295,7 @@ end run`;
 			tweetId,
 			previous?.windowId ?? "",
 			previous?.tabId ?? "",
+			profileDir ?? "",
 		]).then((stdout) => {
 			const target = parseChromeTabTarget(stdout);
 			if (!target) {
@@ -269,6 +319,7 @@ end run`;
 				url,
 				tweet.id,
 				chromeTabTarget,
+				loadConfig().chromeProfile,
 			);
 			return;
 		} catch (error) {
