@@ -29,76 +29,174 @@ const FOOTER_ROWS = 1;
 const DIFF_SEPARATOR = " │ ";
 const DIFF_SEPARATOR_WIDTH = 3;
 
-function ansiFg(theme: Theme, truecolor: string, fallback256: number): string {
-	return theme.getColorMode() === "truecolor"
-		? truecolor
-		: `\x1b[38;5;${fallback256}m`;
+type ColorPair = { tc: string; c256: number };
+type DualColor = { light: ColorPair; dark: ColorPair };
+
+function dual(
+	lightTc: string,
+	light256: number,
+	darkTc: string,
+	dark256: number,
+): DualColor {
+	return {
+		light: { tc: lightTc, c256: light256 },
+		dark: { tc: darkTc, c256: dark256 },
+	};
 }
 
-function ansiBg(theme: Theme, truecolor: string, fallback256: number): string {
+// Card backgrounds: light pastel cards on light terminals, deep muted tones
+// on dark terminals so the overlay blends with the surrounding theme.
+const BG_COLORS: Record<BlockTone, DualColor> = {
+	original: dual("255;232;226", 224, "56;36;36", 52),
+	translation: dual("218;246;231", 194, "26;48;38", 22),
+	code: dual("242;237;250", 189, "42;36;58", 54),
+	error: dual("255;226;226", 224, "72;28;28", 52),
+};
+
+// Left rail / title accents: darker than the card in light mode, brighter in
+// dark mode so they pop against the deep card backgrounds.
+const RAIL_COLORS: Record<BlockTone, DualColor> = {
+	original: dual("205;48;65", 160, "248;113;113", 203),
+	translation: dual("20;132;79", 28, "74;222;128", 77),
+	code: dual("100;82;150", 97, "167;139;250", 141),
+	error: dual("205;48;65", 160, "248;113;113", 203),
+};
+
+const TEXT_COLORS: Record<BlockTone, DualColor> = {
+	original: dual("31;41;55", 235, "229;225;222", 253),
+	translation: dual("20;70;47", 29, "187;236;205", 152),
+	code: dual("48;105;68", 29, "214;205;246", 189),
+	error: dual("185;28;28", 160, "252;165;165", 217),
+};
+
+const BASIC_16: ReadonlyArray<readonly [number, number, number]> = [
+	[0, 0, 0], [205, 0, 0], [0, 205, 0], [205, 205, 0],
+	[0, 0, 238], [205, 0, 205], [0, 205, 205], [229, 229, 229],
+	[127, 127, 127], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+	[92, 92, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+];
+
+function xterm256ToRgb(code: number): { r: number; g: number; b: number } {
+	if (code < 16) {
+		const [r = 0, g = 0, b = 0] = BASIC_16[code] ?? [];
+		return { r, g, b };
+	}
+	if (code >= 232) {
+		const v = 8 + (code - 232) * 10;
+		return { r: v, g: v, b: v };
+	}
+	const idx = code - 16;
+	const steps = [0, 95, 135, 175, 215, 255];
+	return {
+		r: steps[Math.floor(idx / 36) % 6] ?? 0,
+		g: steps[Math.floor(idx / 6) % 6] ?? 0,
+		b: steps[idx % 6] ?? 0,
+	};
+}
+
+function parseAnsiColor(ansi: string): { r: number; g: number; b: number } | undefined {
+	const truecolor = ansi.match(/\[[34]8;2;(\d+);(\d+);(\d+)m/);
+	if (truecolor) {
+		return { r: Number(truecolor[1]), g: Number(truecolor[2]), b: Number(truecolor[3]) };
+	}
+	const indexed = ansi.match(/\[[34]8;5;(\d+)m/);
+	if (indexed) return xterm256ToRgb(Number(indexed[1]));
+	return undefined;
+}
+
+let darkThemeCacheKey: string | undefined;
+let darkThemeCacheValue = false;
+
+// The global theme can hot-swap at runtime (e.g. the mac-system-theme
+// extension follows the macOS appearance), so detect dark mode per call and
+// memoize on the resolved values rather than the Theme instance.
+export function isDarkTheme(theme: Theme): boolean {
+	const textAnsi = theme.getFgAnsi("text");
+	const key = `${theme.name ?? ""}|${textAnsi}`;
+	if (key === darkThemeCacheKey) return darkThemeCacheValue;
+	let dark: boolean;
+	if (theme.name === "light") {
+		dark = false;
+	} else if (theme.name === "dark") {
+		dark = true;
+	} else {
+		// Custom theme: bright body text implies a dark terminal background.
+		const rgb = parseAnsiColor(textAnsi);
+		dark = rgb ? rgb.r * 0.2126 + rgb.g * 0.7152 + rgb.b * 0.0722 >= 140 : false;
+	}
+	darkThemeCacheKey = key;
+	darkThemeCacheValue = dark;
+	return dark;
+}
+
+function resolve(theme: Theme, color: DualColor): ColorPair {
+	return isDarkTheme(theme) ? color.dark : color.light;
+}
+
+function ansiFg(theme: Theme, color: ColorPair): string {
 	return theme.getColorMode() === "truecolor"
-		? truecolor
-		: `\x1b[48;5;${fallback256}m`;
+		? `\x1b[38;2;${color.tc}m`
+		: `\x1b[38;5;${color.c256}m`;
+}
+
+function ansiBg(theme: Theme, color: ColorPair): string {
+	return theme.getColorMode() === "truecolor"
+		? `\x1b[48;2;${color.tc}m`
+		: `\x1b[48;5;${color.c256}m`;
 }
 
 function blockBg(theme: Theme, tone: BlockTone, text: string): string {
-	const bg =
-		tone === "translation"
-			? ansiBg(theme, "\x1b[48;2;218;246;231m", 194)
-			: tone === "code"
-				? ansiBg(theme, "\x1b[48;2;242;237;250m", 189)
-				: tone === "error"
-					? ansiBg(theme, "\x1b[48;2;255;226;226m", 224)
-					: ansiBg(theme, "\x1b[48;2;255;232;226m", 224);
-	return `${bg}${text}${RESET_BG}`;
+	return `${ansiBg(theme, resolve(theme, BG_COLORS[tone]))}${text}${RESET_BG}`;
 }
 
 function rail(theme: Theme, tone: BlockTone, text: string): string {
-	const fg =
-		tone === "translation"
-			? ansiFg(theme, "\x1b[38;2;20;132;79m", 28)
-			: tone === "code"
-				? ansiFg(theme, "\x1b[38;2;100;82;150m", 97)
-				: ansiFg(theme, "\x1b[38;2;205;48;65m", 160);
+	const fg = ansiFg(theme, resolve(theme, RAIL_COLORS[tone]));
 	return `${fg}${theme.bold(text)}${RESET_FG}`;
 }
 
 function blockText(theme: Theme, tone: BlockTone, text: string): string {
-	if (tone === "error") {
-		return `${ansiFg(theme, "\x1b[38;2;185;28;28m", 160)}${text}${RESET_FG}`;
-	}
-	if (tone === "translation") {
-		return `${ansiFg(theme, "\x1b[38;2;20;70;47m", 29)}${text}${RESET_FG}`;
-	}
-	if (tone === "code") {
-		return `${ansiFg(theme, "\x1b[38;2;48;105;68m", 29)}${text}${RESET_FG}`;
-	}
-	return `${ansiFg(theme, "\x1b[38;2;31;41;55m", 235)}${text}${RESET_FG}`;
+	return `${ansiFg(theme, resolve(theme, TEXT_COLORS[tone]))}${text}${RESET_FG}`;
 }
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
 	return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
-function toneFg(theme: Theme, truecolor: string, fallback256: number): (text: string) => string {
-	return (text) => `${ansiFg(theme, `\x1b[38;2;${truecolor}m`, fallback256)}${text}${RESET_FG}`;
+// Resolves light/dark lazily on every call so cached closures stay correct
+// when the theme hot-swaps while the overlay is open.
+function toneFg(theme: Theme, color: DualColor): (text: string) => string {
+	return (text) => `${ansiFg(theme, resolve(theme, color))}${text}${RESET_FG}`;
 }
 
-// Markdown palette tuned for the overlay's light pastel card backgrounds. The
-// global theme's markdown colors target the terminal background, so they can
-// become unreadable here; instead reuse the card palette with darker accents.
+const MD_COLORS = {
+	headingTranslation: dual("6;78;59", 22, "134;239;172", 120),
+	headingOriginal: dual("17;24;39", 234, "243;244;246", 255),
+	accentTranslation: dual("20;132;79", 28, "74;222;128", 77),
+	accentOriginal: dual("205;48;65", 160, "248;113;113", 203),
+	mutedTranslation: dual("96;134;113", 65, "134;170;150", 108),
+	mutedOriginal: dual("120;113;108", 245, "168;162;158", 246),
+	link: dual("29;78;216", 26, "147;197;253", 111),
+	linkUrl: dual("96;125;199", 67, "125;160;220", 110),
+	inlineCode: dual("109;40;217", 92, "198;183;254", 183),
+	codeBlockTranslation: dual("48;105;68", 29, "144;205;168", 115),
+	codeBlockOriginal: dual("87;83;78", 240, "189;183;175", 250),
+};
+
+// Markdown palette tuned for the overlay's card backgrounds. The global
+// theme's markdown colors target the terminal background, so they can become
+// unreadable here; instead reuse the card palette with theme-aware accents.
 function buildMarkdownTheme(theme: Theme, tone: BlockTone): MarkdownTheme {
 	const isTranslation = tone === "translation";
-	const heading = isTranslation ? toneFg(theme, "6;78;59", 22) : toneFg(theme, "17;24;39", 234);
-	const accent = isTranslation ? toneFg(theme, "20;132;79", 28) : toneFg(theme, "205;48;65", 160);
-	const muted = isTranslation ? toneFg(theme, "96;134;113", 65) : toneFg(theme, "120;113;108", 245);
-	const linkFg = toneFg(theme, "29;78;216", 26);
+	const heading = toneFg(theme, isTranslation ? MD_COLORS.headingTranslation : MD_COLORS.headingOriginal);
+	const accent = toneFg(theme, isTranslation ? MD_COLORS.accentTranslation : MD_COLORS.accentOriginal);
+	const muted = toneFg(theme, isTranslation ? MD_COLORS.mutedTranslation : MD_COLORS.mutedOriginal);
+	const linkFg = toneFg(theme, MD_COLORS.link);
 	return {
 		heading,
 		link: (text) => theme.underline(linkFg(text)),
-		linkUrl: toneFg(theme, "96;125;199", 67),
-		code: toneFg(theme, "109;40;217", 92),
-		codeBlock: isTranslation ? toneFg(theme, "48;105;68", 29) : toneFg(theme, "87;83;78", 240),
+		linkUrl: toneFg(theme, MD_COLORS.linkUrl),
+		code: toneFg(theme, MD_COLORS.inlineCode),
+		codeBlock: toneFg(theme, isTranslation ? MD_COLORS.codeBlockTranslation : MD_COLORS.codeBlockOriginal),
 		codeBlockBorder: muted,
 		quote: muted,
 		quoteBorder: accent,
@@ -121,6 +219,7 @@ export class TranslationOverlay implements Component {
 	private statusText = "Preparing translation...";
 	private closed = false;
 	private cachedWidth = 0;
+	private cachedDark: boolean | undefined;
 	private cachedContent: string[] = [];
 	private modelLabel: string;
 	private readonly disableMouse: () => void;
@@ -243,6 +342,13 @@ export class TranslationOverlay implements Component {
 
 	render(width: number): string[] {
 		const W = Math.max(60, width);
+		// Rebuild cached lines when the theme flips between light and dark while
+		// the overlay is open (e.g. mac-system-theme follows the OS appearance).
+		const dark = isDarkTheme(this.theme);
+		if (dark !== this.cachedDark) {
+			this.cachedDark = dark;
+			this.invalidate();
+		}
 		const body = this.bodyRows();
 		const content = this.getContent(W);
 		const maxScroll = Math.max(0, content.length - body);
