@@ -15,15 +15,17 @@ A Pi TUI extension for English learning.
 The overlay shows the assistant response in original order as a side-by-side diff view with a bordered status header:
 
 - The header shows translation progress, text/code segment counts, current status, and the model channel as `(provider) model`.
+- The overlay opens anchored at the top of the content (first segment), not the bottom.
 - Original text appears in the left `Original` column with a warm background and left rail.
 - Chinese translation appears in the right `Translation` column with a green background and left rail.
+- Both columns render basic Markdown: headings, bold/italic/strikethrough, inline code, links, ordered/unordered lists, blockquotes, and horizontal rules, using a palette tuned for the pastel card backgrounds.
 - Markdown code blocks appear once in `Code shown once` blocks; they are not sent to the model and are not translated.
 - Related Markdown blocks are grouped into larger sections before translation, so headings, paragraphs, quotes, and lists stay readable instead of becoming many tiny cards.
 - Translation streams into the matching `Translation` column when the model emits tagged output.
 - Successful translations are cached in memory and reused when the same assistant response is opened again. The cache keeps the latest 50 responses and evicts older entries automatically.
 - `Esc` or `Command+Shift+M` closes the overlay. Closing while streaming cancels the model request.
 - Scroll with `↑/↓`, `PgUp/PgDn`, `g/G`, or touchpad/mouse wheel when the terminal supports mouse reporting.
-- Press `f` to resume auto-follow after manually scrolling.
+- Auto-follow is off by default; press `f` to follow streaming output at the bottom, and any manual scroll turns it off again.
 
 ## Model selection
 

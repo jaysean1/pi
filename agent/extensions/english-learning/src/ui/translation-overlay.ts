@@ -1,9 +1,11 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
+	Markdown,
 	matchesKey,
 	truncateToWidth,
 	type Component,
+	type MarkdownTheme,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import type {
@@ -78,9 +80,43 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 	return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
+function toneFg(theme: Theme, truecolor: string, fallback256: number): (text: string) => string {
+	return (text) => `${ansiFg(theme, `\x1b[38;2;${truecolor}m`, fallback256)}${text}${RESET_FG}`;
+}
+
+// Markdown palette tuned for the overlay's light pastel card backgrounds. The
+// global theme's markdown colors target the terminal background, so they can
+// become unreadable here; instead reuse the card palette with darker accents.
+function buildMarkdownTheme(theme: Theme, tone: BlockTone): MarkdownTheme {
+	const isTranslation = tone === "translation";
+	const heading = isTranslation ? toneFg(theme, "6;78;59", 22) : toneFg(theme, "17;24;39", 234);
+	const accent = isTranslation ? toneFg(theme, "20;132;79", 28) : toneFg(theme, "205;48;65", 160);
+	const muted = isTranslation ? toneFg(theme, "96;134;113", 65) : toneFg(theme, "120;113;108", 245);
+	const linkFg = toneFg(theme, "29;78;216", 26);
+	return {
+		heading,
+		link: (text) => theme.underline(linkFg(text)),
+		linkUrl: toneFg(theme, "96;125;199", 67),
+		code: toneFg(theme, "109;40;217", 92),
+		codeBlock: isTranslation ? toneFg(theme, "48;105;68", 29) : toneFg(theme, "87;83;78", 240),
+		codeBlockBorder: muted,
+		quote: muted,
+		quoteBorder: accent,
+		hr: muted,
+		listBullet: accent,
+		bold: (text) => theme.bold(text),
+		italic: (text) => theme.italic(text),
+		strikethrough: (text) => theme.strikethrough(text),
+		underline: (text) => theme.underline(text),
+	};
+}
+
 export class TranslationOverlay implements Component {
 	private scroll = 0;
-	private autoFollow = true;
+	// Anchor the view at the start of the content when the overlay opens; users
+	// opt into bottom-following explicitly with `f`.
+	private autoFollow = false;
+	private readonly markdownThemes = new Map<BlockTone, MarkdownTheme>();
 	private runStatus: OverlayRunStatus = "idle";
 	private statusText = "Preparing translation...";
 	private closed = false;
@@ -379,9 +415,40 @@ export class TranslationOverlay implements Component {
 	}
 
 	private renderCellLines(text: string, width: number, tone: BlockTone): string[] {
+		if (tone === "original" || tone === "translation") {
+			return this.renderMarkdownCellLines(text, width, tone);
+		}
 		return wrapBlock(text, Math.max(1, width - 2)).map((line) =>
 			this.renderCellLine(line, width, tone),
 		);
+	}
+
+	private renderMarkdownCellLines(text: string, width: number, tone: BlockTone): string[] {
+		const contentWidth = Math.max(1, width - 2);
+		const markdown = new Markdown(
+			text,
+			0,
+			0,
+			this.markdownThemeFor(tone),
+			{ color: (value) => blockText(this.theme, tone, value) },
+			{ preserveOrderedListMarkers: true },
+		);
+		const rendered = [...markdown.render(contentWidth)];
+		while (rendered.length > 0 && (rendered[rendered.length - 1] ?? "").trim() === "") {
+			rendered.pop();
+		}
+		if (rendered.length === 0) rendered.push("");
+		const prefix = rail(this.theme, tone, "▌ ");
+		return rendered.map((line) => blockBg(this.theme, tone, padTo(prefix + line, width)));
+	}
+
+	private markdownThemeFor(tone: BlockTone): MarkdownTheme {
+		let markdownTheme = this.markdownThemes.get(tone);
+		if (!markdownTheme) {
+			markdownTheme = buildMarkdownTheme(this.theme, tone);
+			this.markdownThemes.set(tone, markdownTheme);
+		}
+		return markdownTheme;
 	}
 
 	private renderCellLine(
