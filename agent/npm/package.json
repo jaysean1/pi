@@ -2,8 +2,10 @@
   "name": "pi-extensions",
   "private": true,
   "dependencies": {
-    "@juicesharp/rpiv-ask-user-question": "^1.18.2",
-    "@juicesharp/rpiv-todo": "^1.18.2",
+    "@diegopetrucci/pi-openai-fast": "^0.1.4",
+    "@guwidoe/pi-prompt-suggester": "^0.3.10",
+    "@juicesharp/rpiv-ask-user-question": "^1.19.1",
+    "@juicesharp/rpiv-todo": "^1.19.1",
     "pi-web-access": "^0.10.7"
   }
 }
