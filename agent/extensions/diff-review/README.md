@@ -85,6 +85,13 @@ The extension adds the review entry to the same footer line as the current path,
 
 Use `Tab` or `Shift+Tab` to switch between `📝 Diff` and `📁 Files`.
 
+While the overlay is open, terminal mouse reporting is enabled
+(`?1000h`/`?1006h` SGR mode) so touchpad two-finger scrolling and mouse wheels
+scroll the right-hand content pane (3 lines per notch; batched reports from
+fast flicks are aggregated). Left panes stay keyboard-driven. Reporting is
+restored automatically when the overlay closes, so text selection in the main
+view is unaffected.
+
 ### Diff tab
 
 The diff tab has a file list on the left and a vertical unified diff on the right.
@@ -94,6 +101,7 @@ markers and a deletion background.
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` | Move file selection. |
+| Touchpad / wheel | Scroll the unified diff, regardless of pane focus. |
 | `PgUp` / `PgDn` | Jump selection or diff scroll by a page. |
 | `Enter` | Open the selected file externally. |
 | `Space` / `→` | Enter the diff pane. |
@@ -109,6 +117,7 @@ pane shows a tree. The right pane previews the selected directory or file.
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` | Move tree selection, or scroll preview when the preview pane is focused. |
+| Touchpad / wheel | Scroll the preview, regardless of pane focus. |
 | `PgUp` / `PgDn` | Move or scroll by a page. |
 | `Enter` | Open a file externally. Directories expand or collapse. |
 | `Space` / `→` | Expand directories or focus a file preview. |

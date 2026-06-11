@@ -36,7 +36,15 @@ import type {
 	UnifiedDiffLine,
 } from "../core/types.ts";
 import { isToggleKey } from "../platform/keys.ts";
+import {
+	enableMouseWheel,
+	isMouseSequence,
+	parseWheelEvents,
+} from "../platform/mouse.ts";
 import { clamp, colourBlindDiffLine } from "./ui-utils.ts";
+
+// Lines scrolled per wheel notch; matches the english-learning overlay.
+const WHEEL_SCROLL_LINES = 3;
 
 class DiffBrowseOverlay {
 	private activeTab: ActiveTab;
@@ -53,10 +61,11 @@ class DiffBrowseOverlay {
 	private previewPath = "";
 	private preview?: FilePreview;
 	private readonly browseRoot: BrowseNode;
+	private readonly disableMouse: () => void;
 
 	constructor(
 		private readonly tui: {
-			terminal: { rows: number };
+			terminal: { rows: number; write: (data: string) => void };
 			requestRender: () => void;
 		},
 		private readonly theme: Theme,
@@ -72,6 +81,14 @@ class DiffBrowseOverlay {
 	) {
 		this.activeTab = initialTab;
 		this.browseRoot = createBrowseRoot(cwd);
+		// Touchpad two-finger scrolling arrives as wheel reports once mouse
+		// reporting is on. dispose() restores the terminal; ui.custom calls it
+		// automatically when the overlay closes.
+		this.disableMouse = enableMouseWheel(tui.terminal);
+	}
+
+	dispose(): void {
+		this.disableMouse();
 	}
 
 	private currentDiff(): FileDiff | undefined {
@@ -104,6 +121,19 @@ class DiffBrowseOverlay {
 			this.done("dismiss");
 			return;
 		}
+		// Touchpad / wheel always scrolls the right-hand content pane (diff or
+		// preview) regardless of pane focus; left panes stay keyboard-driven.
+		const wheel = parseWheelEvents(data);
+		if (wheel.length > 0) {
+			let delta = 0;
+			for (const direction of wheel) {
+				delta += direction === "down" ? WHEEL_SCROLL_LINES : -WHEEL_SCROLL_LINES;
+			}
+			if (delta !== 0) this.scrollContent(delta);
+			return;
+		}
+		// Swallow click/release reports so they never reach key matching.
+		if (isMouseSequence(data)) return;
 		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
 			this.switchTab();
 			return;
@@ -296,6 +326,15 @@ class DiffBrowseOverlay {
 		if (!file) return 0;
 		const wrapped = wrapUnifiedDiffRows(file.rows, this.diffWidth);
 		return Math.max(0, wrapped.length - this.bodyRows());
+	}
+
+	private scrollContent(delta: number): void {
+		if (this.activeTab === "diff") {
+			if (this.files.length === 0) return;
+			this.scrollDiff(delta);
+			return;
+		}
+		this.scrollPreview(delta);
 	}
 
 	private scrollDiff(delta: number): void {
@@ -672,14 +711,14 @@ class DiffBrowseOverlay {
 		if (this.files.length === 0)
 			return " Tab switch tabs · Esc close";
 		return this.diffFocus === "list"
-			? " Tab switch tabs · ↑↓ select file · Enter open · Space/→ diff · c clear · Esc close"
-			: " Tab switch tabs · Enter open · ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · ←/Esc back";
+			? " Tab switch tabs · ↑↓ select file · Enter open · Space/→ diff · touchpad scroll · c clear · Esc close"
+			: " Tab switch tabs · Enter open · ↑↓/touchpad scroll · PgUp/PgDn page · g/G top/bottom · ←/Esc back";
 	}
 
 	private browseHelp(): string {
 		return this.browseFocus === "tree"
-			? " Tab switch tabs · ↑↓ select · Enter open file · Space/→ preview · ← collapse/up · Esc close"
-			: " Tab switch tabs · Enter open file · ↑↓ scroll · PgUp/PgDn page · ←/Esc tree";
+			? " Tab switch tabs · ↑↓ select · Enter open file · Space/→ preview · touchpad scroll · ← collapse/up · Esc close"
+			: " Tab switch tabs · Enter open file · ↑↓/touchpad scroll · PgUp/PgDn page · ←/Esc tree";
 	}
 }
 
