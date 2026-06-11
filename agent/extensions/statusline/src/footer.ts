@@ -26,6 +26,11 @@ import {
 // kept in sync with Theme.getThinkingBorderColor's accepted levels.
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+// Status key used by @diegopetrucci/pi-openai-fast (ctx.ui.setStatus("openai-fast", "fast")).
+// We render it inline after the model's reasoning effort (e.g. `… • high • ⚡️fast`)
+// instead of letting it occupy the extension status line.
+const OPENAI_FAST_STATUS_KEY = "openai-fast";
+
 export class StatuslineFooter implements Component {
 	private readonly unsubscribeBranch?: () => void;
 
@@ -131,7 +136,11 @@ export class StatuslineFooter implements Component {
 		const modelName = this.ctx.model?.id || "no-model";
 		const level = this.getThinkingLevel();
 		const levelLabel = level === "off" ? "thinking off" : level;
-		const reasoningWidth = visibleWidth(` • ${levelLabel}`);
+		const fastActive =
+			this.footerData.getExtensionStatuses().get(OPENAI_FAST_STATUS_KEY) ===
+			"fast";
+		const fastSuffix = fastActive ? " • ⚡️fast" : "";
+		const reasoningWidth = visibleWidth(` • ${levelLabel}${fastSuffix}`);
 
 		let rightBase = modelName;
 		if (this.footerData.getAvailableProviderCount() > 1 && this.ctx.model) {
@@ -147,9 +156,13 @@ export class StatuslineFooter implements Component {
 			}
 		}
 
-		const rightRendered =
+		let rightRendered =
 			this.theme.fg("dim", `${rightBase} • `) +
 			this.theme.getThinkingBorderColor(level)(levelLabel);
+		if (fastActive) {
+			rightRendered +=
+				this.theme.fg("dim", " • ") + this.theme.fg("warning", "⚡️fast");
+		}
 
 		return this.composeSimpleLine(width, [
 			contextRendered,
@@ -160,8 +173,12 @@ export class StatuslineFooter implements Component {
 
 	private renderExtensionStatusLines(width: number): string[] {
 		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size === 0) return [];
-		const statusLine = Array.from(extensionStatuses.entries())
+		// openai-fast is rendered inline on the stats line, not here.
+		const entries = Array.from(extensionStatuses.entries()).filter(
+			([id]) => id !== OPENAI_FAST_STATUS_KEY,
+		);
+		if (entries.length === 0) return [];
+		const statusLine = entries
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([, text]) => sanitizeStatusText(text))
 			.join("  |  ");
