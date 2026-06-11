@@ -436,6 +436,7 @@ end run`;
 	}
 
 	async function openBrowser(ctx: ExtensionContext): Promise<void> {
+		getFocusedEditor();
 		if (overlayBusy) return;
 		overlayBusy = true;
 		try {
@@ -493,6 +494,42 @@ end run`;
 
 	// --- focus helpers -------------------------------------------------------
 
+	type FocusableEditorComponent = EditorComponent & { focused?: boolean };
+
+	function isEditorComponentLike(value: unknown): value is EditorComponent {
+		if (!value || typeof value !== "object") return false;
+		const probe = value as {
+			getText?: unknown;
+			setText?: unknown;
+			handleInput?: unknown;
+		};
+		return (
+			typeof probe.getText === "function" &&
+			typeof probe.setText === "function" &&
+			typeof probe.handleInput === "function"
+		);
+	}
+
+	function getFocusedComponent(): unknown {
+		// TUI keeps the focused component as an internal field. We only read it as a
+		// fallback because another extension (for example prompt-suggester's ghost
+		// editor) may replace the editor after our transparent wrapper was installed.
+		return (tuiRef as unknown as { focusedComponent?: unknown } | undefined)
+			?.focusedComponent;
+	}
+
+	function getFocusedEditor(): EditorComponent | undefined {
+		const focused = getFocusedComponent();
+		if (isEditorComponentLike(focused)) {
+			editorRef = focused;
+			return focused;
+		}
+		if ((editorRef as FocusableEditorComponent | undefined)?.focused === true) {
+			return editorRef;
+		}
+		return undefined;
+	}
+
 	function focusEditor(): void {
 		if (tuiRef && editorRef) {
 			tuiRef.setFocus(editorRef);
@@ -500,14 +537,21 @@ end run`;
 		}
 	}
 
+	function focusPreview(): void {
+		// Capture the currently focused editor before moving focus away so ↑/Esc can
+		// return to it even when the editor came from a later-loaded extension.
+		getFocusedEditor();
+		preview?.focus();
+	}
+
 	function isEditorFocused(): boolean {
-		return (editorRef as { focused?: boolean } | undefined)?.focused === true;
+		return getFocusedEditor() !== undefined;
 	}
 
 	// Some extensions wrap the editor; walk the `.base` chain so completion
 	// menus keep ownership of ↑/↓ while autocomplete is open.
 	function isEditorAutocompleteOpen(): boolean {
-		let node: unknown = editorRef;
+		let node: unknown = getFocusedEditor() ?? editorRef;
 		const seen = new Set<unknown>();
 
 		for (let depth = 0; node && depth < 10 && !seen.has(node); depth++) {
@@ -587,7 +631,7 @@ end run`;
 		// Raw input: ↓ from an empty, focused editor enters the Twitter preview.
 		// diff-review yields this key to us when our chain handle is published.
 		const unsubInput = ctx.ui.onTerminalInput((data) => {
-			if (!preview || !editorRef) return undefined;
+			if (!preview) return undefined;
 			if (
 				matchesKey(data, Key.down) &&
 				isEditorFocused() &&
@@ -595,7 +639,7 @@ end run`;
 				!isEditorAutocompleteOpen() &&
 				ctx.ui.getEditorText().trim().length === 0
 			) {
-				preview.focus();
+				focusPreview();
 				return { consume: true };
 			}
 			return undefined;
@@ -603,7 +647,7 @@ end run`;
 
 		// Publish the chain handle so diff-review can hand focus to us.
 		publishTwitterChain({
-			focusPreview: () => preview?.focus(),
+			focusPreview,
 			isPreviewFocused: () => preview?.focused === true,
 		});
 
@@ -669,7 +713,7 @@ end run`;
 				);
 				return;
 			}
-			if (preview) preview.focus();
+			if (preview) focusPreview();
 			else ctx.ui.notify("Twitter preview is not active", "warning");
 		},
 	});
