@@ -9,13 +9,13 @@ export const TOGGLE_KEY = Key.superShift("right");
 export const TOGGLE_SEQUENCE_KAKU = "\x1b[992~";
 export const COMMAND_OPEN = "review";
 export const COMMAND_DEMO = "review-demo";
+// Only write/edit are tracked. Bash is deliberately untracked: before/after
+// tree scans pulled generated process files (tool logs, pipeline caches) into
+// the review set; write/edit covers the agent's intentional file changes.
 export const TRACKED_TOOLS = new Set(["write", "edit"]);
-export const BASH_TOOL = "bash";
 export const PERSISTED_STATE_VERSION = 1;
 
 export const MAX_FILE_BYTES = 512 * 1024; // Skip diffing files larger than this.
-export const BASH_SCAN_MAX_FILES = 2_500; // Cap per-bash project scans to keep tracking lightweight.
-export const BASH_SCAN_MAX_TOTAL_BYTES = 16 * 1024 * 1024; // Cap text bytes read per scan.
 export const LCS_BUDGET = 4_000_000; // Skip exact LCS when midA*midB exceeds this; fall back to block replace.
 export const SIDEBAR_MIN = 20;
 export const SIDEBAR_MAX = 36;
