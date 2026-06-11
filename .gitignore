@@ -16,3 +16,6 @@ agent/bin/
 # Runtime noise
 *.log
 *.lock
+
+# Prompt suggester generated per-project seeds
+agent/prompt-suggester/projects/
