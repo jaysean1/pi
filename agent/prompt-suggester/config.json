@@ -3,6 +3,13 @@
   "suggestion": {
     "ghostAcceptKeys": [
       "right"
-    ]
+    ],
+    "showUsageInPanel": false
+  },
+  "inference": {
+    "seederModel": "openai-codex/gpt-5.3-codex-spark",
+    "suggesterModel": "openai-codex/gpt-5.3-codex-spark",
+    "seederThinking": "minimal",
+    "suggesterThinking": "minimal"
   }
 }
