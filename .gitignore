@@ -17,5 +17,12 @@ agent/bin/
 *.log
 *.lock
 
+# Cursor / Pi Studio runtime
+agent/cursor-model-cache.json
+agent/cursor-proxy.json
+agent/run-history.jsonl
+pistudio-instances/
+agent/extensions/kooky.ts
+
 # Prompt suggester generated per-project seeds
 agent/prompt-suggester/projects/
