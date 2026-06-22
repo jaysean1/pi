@@ -1,20 +1,21 @@
 {
-  "defaultModel": "claude-opus-4-8",
-  "defaultProvider": "anthropic",
-  "defaultThinkingLevel": "xhigh",
-  "lastChangelogVersion": "0.79.2",
+  "defaultModel": "composer-2.5-fast",
+  "defaultProvider": "cursor",
+  "defaultThinkingLevel": "high",
+  "lastChangelogVersion": "0.79.9",
   "packages": [
     "npm:pi-web-access",
     "npm:@juicesharp/rpiv-ask-user-question",
     "npm:@juicesharp/rpiv-todo",
     "extensions/anthropic-subscription-prompt-cleaner",
-    "/Users/jayseanqian/.vibe-island/pi-extension",
     "npm:@guwidoe/pi-prompt-suggester",
-    "npm:@diegopetrucci/pi-openai-fast"
+    "npm:@diegopetrucci/pi-openai-fast",
+    "/Users/jayseanqian/.vibe-island/pi-extension",
+    "npm:@schultzp2020/pi-cursor"
   ],
   "quietStartup": true,
   "terminal": {
-    "showImages": false
+    "showImages": true
   },
   "theme": "light",
   "treeFilterMode": "user-only",
