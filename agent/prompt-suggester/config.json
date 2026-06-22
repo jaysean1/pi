@@ -4,6 +4,7 @@
     "ghostAcceptKeys": [
       "right"
     ],
+    "displayMode": "widget",
     "showUsageInPanel": false
   },
   "inference": {
