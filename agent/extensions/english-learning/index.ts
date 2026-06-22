@@ -1,6 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import type { EditorComponent, Focusable } from "@earendil-works/pi-tui";
+import {
+	Key,
+	matchesKey,
+	type EditorComponent,
+	type Focusable,
+} from "@earendil-works/pi-tui";
 import { cancelInputOptimization, optimizeCurrentInput } from "./src/actions/optimize-input.ts";
 import {
 	closeTranslationOverlay,
@@ -8,6 +13,7 @@ import {
 	openOrToggleTranslation,
 } from "./src/actions/translate-last.ts";
 import { COMMAND_NAME, EXTENSION_ID, TRANSLATE_KEY } from "./src/core/config.ts";
+import { shouldSkipInputRewrite } from "./src/core/text-utils.ts";
 import { formatModelChoice, resolveModel } from "./src/core/model-resolver.ts";
 import { clearTranslationCache, getTranslationCacheStats } from "./src/core/translation-cache.ts";
 import { describeKeyInput, isTranslateToggleKey, isTranslateToggleKeyPress } from "./src/platform/keys.ts";
@@ -108,6 +114,30 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 		state.cleanup?.();
 		state.cleanup = undefined;
 
+		const editorAdapter: EditorComponent = {
+			getText: () => ctx.ui.getEditorText(),
+			getExpandedText: () => ctx.ui.getEditorText(),
+			setText: (text: string) => ctx.ui.setEditorText(text),
+			insertTextAtCursor: (text: string) => ctx.ui.pasteToEditor(text),
+			handleInput: () => {},
+			render: () => [],
+			invalidate: () => {},
+		};
+
+		const getOptimizationEditor = (): EditorComponent => {
+			if (activeEditor?.focused) return activeEditor;
+			return editorAdapter;
+		};
+
+		const maybeOptimizeInput = (): boolean => {
+			if (isTranslationOverlayOpen()) return false;
+			const editor = getOptimizationEditor();
+			const text = editor.getExpandedText?.() ?? editor.getText();
+			if (!text.trim() || shouldSkipInputRewrite(text)) return false;
+			void optimizeCurrentInput(ctx, editor);
+			return true;
+		};
+
 		const unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 			if (Date.now() <= debugKeysUntil) {
 				ctx.ui.notify(
@@ -119,31 +149,49 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 				if (isTranslateToggleKeyPress(data)) toggleTranslationFromShortcut(ctx);
 				return { consume: true };
 			}
+			if (matchesKey(data, Key.tab) && maybeOptimizeInput()) {
+				return { consume: true };
+			}
 			return undefined;
 		});
 
-		const previousFactory = ctx.ui.getEditorComponent();
-		ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
-			const base =
-				previousFactory?.(tui, editorTheme, keybindings) ??
-				new CustomEditor(tui, editorTheme, keybindings);
-			activeEditor = new EnglishEditorBridge(base, {
-				onOptimize: (editor) => {
-					void optimizeCurrentInput(ctx, editor);
-				},
-				onTranslateToggle: () => toggleTranslationFromShortcut(ctx),
-			});
-			return activeEditor;
-		});
-
 		let cleaned = false;
+		let installTimer: ReturnType<typeof setTimeout> | undefined;
+		let restoreFactory: ReturnType<typeof ctx.ui.getEditorComponent> | undefined;
+
+		const installEditorBridge = () => {
+			if (cleaned) return;
+
+			// Install after the current session_start dispatch has settled, then wrap
+			// whichever editor factory is active at that point. This lets us compose
+			// with prompt-suggester's GhostSuggestionEditor instead of being overwritten
+			// by it when extensions load in the opposite order.
+			restoreFactory = ctx.ui.getEditorComponent();
+			ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
+				const base =
+					restoreFactory?.(tui, editorTheme, keybindings) ??
+					new CustomEditor(tui, editorTheme, keybindings);
+				activeEditor = new EnglishEditorBridge(base, {
+					onOptimize: (editor) => {
+						void optimizeCurrentInput(ctx, editor);
+					},
+					onTranslateToggle: () => toggleTranslationFromShortcut(ctx),
+				});
+				return activeEditor;
+			});
+		};
+
+		installTimer = setTimeout(installEditorBridge, 0);
+		installTimer.unref?.();
+
 		state.cleanup = () => {
 			if (cleaned) return;
 			cleaned = true;
+			if (installTimer) clearTimeout(installTimer);
 			unsubscribeInput();
 			cancelInputOptimization();
 			ctx.ui.setStatus(EXTENSION_ID, undefined);
-			ctx.ui.setEditorComponent(previousFactory);
+			ctx.ui.setEditorComponent(restoreFactory);
 			activeEditor = undefined;
 		};
 	});
