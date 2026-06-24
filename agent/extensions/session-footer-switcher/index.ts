@@ -163,6 +163,7 @@ async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
 		const content = await readFile(session.path, "utf8");
 		const userMessages: string[] = [];
 		const assistantMessages: string[] = [];
+		const recapMessages: string[] = [];
 
 		for (const line of content.split("\n")) {
 			if (!line.trim()) continue;
@@ -170,6 +171,24 @@ async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
 			try {
 				entry = JSON.parse(line);
 			} catch {
+				continue;
+			}
+
+			// session-recap 插件把 recap 存成内联 custom_message（无 message 字段），
+			// 取最后一条作为列表标题：它是模型对整个会话的一句话归纳，比「最新用户
+			// 消息原文」更贴合任务主题。仅改标题来源，detail 仍走原有消息链。
+			const custom = entry as {
+				type?: string;
+				customType?: string;
+				details?: { recap?: string };
+			};
+			if (
+				custom.type === "custom_message" &&
+				custom.customType === "session-recap/line" &&
+				custom.details?.recap
+			) {
+				const recap = cleanSingleLine(custom.details.recap, "");
+				if (recap) recapMessages.push(recap);
 				continue;
 			}
 
@@ -186,10 +205,11 @@ async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
 			}
 		}
 
+		const latestRecap = recapMessages.at(-1);
 		const latestUser = userMessages.at(-1);
 		const firstUser = userMessages[0];
 		const latestAssistant = assistantMessages.at(-1);
-		const titleSource = session.name || latestUser || firstUser || session.firstMessage;
+		const titleSource = latestRecap || session.name || latestUser || firstUser || session.firstMessage;
 		const title = compactText(titleSource, MAX_TITLE_WIDTH);
 		const detailParts = [firstUser && firstUser !== latestUser ? firstUser : undefined, latestUser, latestAssistant]
 			.filter(Boolean)
