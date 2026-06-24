@@ -26,3 +26,6 @@ agent/extensions/kooky.ts
 
 # Prompt suggester generated per-project seeds
 agent/prompt-suggester/projects/
+
+# Installed skills (pulled by pi at runtime)
+agent/skills/

@@ -7,6 +7,6 @@
     "@juicesharp/rpiv-ask-user-question": "^1.20.0",
     "@juicesharp/rpiv-todo": "^1.20.0",
     "@schultzp2020/pi-cursor": "^0.5.0",
-    "pi-web-access": "^0.10.7"
+    "pi-web-access": "^0.12.0"
   }
 }
