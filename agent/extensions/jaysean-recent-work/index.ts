@@ -608,7 +608,15 @@ export class RecentWorkSection implements Component {
 				item.summary = summary;
 				item.source = "llm";
 				item.conversation = "";
-				this.tui.requestRender();
+				// NOTE: intentionally no this.tui.requestRender() here.
+				// This section is rendered inside a ctx.ui.setHeader header, so it lives
+				// at the very top of the TUI buffer. LLM summary upgrades land seconds
+				// later, i.e. after the user has begun working and scrolled down. At that
+				// point prevViewportTop > 0, and any change in the header region satisfies
+				// `firstChanged < prevViewportTop` inside pi-tui, forcing a fullRender
+				// (clear scrollback + reprint from top + snap viewport to bottom).
+				// Update the item silently; the upgraded summary is picked up on the
+				// next natural render (e.g. the user's next keystroke).
 
 				if (cfg.cache) {
 					void writeCacheEntry(item.path, {

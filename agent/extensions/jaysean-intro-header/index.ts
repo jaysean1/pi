@@ -42,6 +42,11 @@ const SWEEP_MS = 1150; // phase 1: rainbow flows in as letters reveal
 const SETTLE_MS = 450; // phase 2: rainbow cools into red, then freezes
 const TOTAL_MS = SWEEP_MS + SETTLE_MS;
 const FRAME_MS = 40; // ~25fps while animating
+// Only play the intro animation for a genuinely fresh, short transcript. When the
+// transcript is long enough to scroll the header above the viewport, pi-tui promotes
+// every animation frame to a full-screen redraw (clear scrollback + reprint from top +
+// snap to bottom). This caps how many entries still count as "short enough".
+const INTRO_MAX_ENTRIES = 8;
 
 // --- Recent-work section ---
 const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and recent section.
@@ -170,10 +175,17 @@ class IntroHeader implements Component {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private recent: (Component & { dispose?: () => void }) | undefined;
 
-	constructor(tui: TUI, theme: Theme, ctx: ExtensionContext) {
+	constructor(tui: TUI, theme: Theme, ctx: ExtensionContext, animate = true) {
 		this.tui = tui;
 		this.theme = theme;
-		this.startAnim();
+		if (animate) {
+			this.startAnim();
+		} else {
+			// Skip the animation: render the final, frozen banner immediately and start no
+			// timer. Avoids the per-frame requestRender() storm that becomes a full-screen
+			// redraw on reload/resume of a long (already-scrolled) session.
+			this.finished = true;
+		}
 		this.recent = createRecentWorkSection(ctx, tui, theme, { indent: HEADER_INDENT });
 	}
 
@@ -332,10 +344,22 @@ class IntroHeader implements Component {
 let active: IntroHeader | undefined;
 
 export default function (pi: ExtensionAPI) {
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		if (!ctx.hasUI) return;
+		// Animate only for a fresh, short view (startup/new with little history), where the
+		// header stays within the viewport (viewportTop === 0) so its per-frame repaints stay
+		// local. On reload/resume/fork the restored history scrolls the header off-screen, and
+		// each animation frame would force a full-screen redraw (flash from top + jump to bottom).
+		let entryCount = 0;
+		try {
+			entryCount = ctx.sessionManager.getEntries().length;
+		} catch {
+			entryCount = 0;
+		}
+		const animate =
+			(event.reason === "startup" || event.reason === "new") && entryCount <= INTRO_MAX_ENTRIES;
 		ctx.ui.setHeader((tui, theme) => {
-			active = new IntroHeader(tui, theme, ctx);
+			active = new IntroHeader(tui, theme, ctx, animate);
 			return active;
 		});
 	});
