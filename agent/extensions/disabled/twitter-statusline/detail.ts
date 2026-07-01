@@ -16,7 +16,18 @@ import {
 	metricsPlain,
 	wrapLines,
 } from "./render.ts";
+import {
+	enableMouseWheel,
+	isMouseSequence,
+	parseWheelEvents,
+} from "./mouse.ts";
 import { fetchTweet, type Tweet, type TweetThread } from "./twitter-cli.ts";
+
+// Fixed chrome around the scrollable body: top border, title, divider, footer
+// divider, footer hint, bottom border.
+const CHROME_ROWS = 6;
+// Lines scrolled per wheel notch; matches the diff-review overlay.
+const WHEEL_SCROLL_LINES = 3;
 
 type ActionStatus = { kind: "info" | "error"; message: string };
 export type OpenTweetExternal = (tweet: Tweet) => Promise<void>;
@@ -74,8 +85,8 @@ export class TweetDetailOverlay implements Component, Focusable {
 	private actionStatus: ActionStatus | undefined;
 	private openingExternal = false;
 	private scroll = 0;
-	private lastViewport = 10;
 	private disposed = false;
+	private readonly disableMouse: () => void;
 
 	constructor(
 		private readonly tui: TUI,
@@ -86,7 +97,15 @@ export class TweetDetailOverlay implements Component, Focusable {
 	) {
 		// Seed with the cached tweet so there is something to show immediately.
 		this.thread = { tweet: seed, replies: [] };
+		// Touchpad two-finger scrolling arrives as wheel reports once mouse
+		// reporting is on. dispose() restores the terminal on close.
+		this.disableMouse = enableMouseWheel(tui.terminal);
 		void this.load(seed.id);
+	}
+
+	// Body height for the current full-screen terminal.
+	private bodyRows(): number {
+		return Math.max(3, this.tui.terminal.rows - CHROME_ROWS);
 	}
 
 	private async load(id: string): Promise<void> {
@@ -107,6 +126,7 @@ export class TweetDetailOverlay implements Component, Focusable {
 
 	dispose(): void {
 		this.disposed = true;
+		this.disableMouse();
 	}
 
 	invalidate(): void {
@@ -114,6 +134,21 @@ export class TweetDetailOverlay implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// Touchpad / wheel scrolls the body; aggregate batched reports.
+		const wheel = parseWheelEvents(data);
+		if (wheel.length > 0) {
+			let delta = 0;
+			for (const direction of wheel) {
+				delta += direction === "down" ? WHEEL_SCROLL_LINES : -WHEEL_SCROLL_LINES;
+			}
+			if (delta !== 0) {
+				this.scroll = Math.max(0, this.scroll + delta); // clamped during render
+				this.tui.requestRender();
+			}
+			return;
+		}
+		// Swallow click/release reports so they never reach key matching.
+		if (isMouseSequence(data)) return;
 		if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
 			this.close();
 			return;
@@ -133,12 +168,12 @@ export class TweetDetailOverlay implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.pageUp)) {
-			this.scroll = Math.max(0, this.scroll - this.lastViewport);
+			this.scroll = Math.max(0, this.scroll - this.bodyRows());
 			this.tui.requestRender();
 			return;
 		}
 		if (matchesKey(data, Key.pageDown)) {
-			this.scroll += this.lastViewport;
+			this.scroll += this.bodyRows();
 			this.tui.requestRender();
 		}
 	}
@@ -231,8 +266,8 @@ export class TweetDetailOverlay implements Component, Focusable {
 		const innerW = Math.max(10, width - 2);
 
 		const content = this.buildContent(innerW);
-		// Reserve: top title, divider, content window, footer hint, borders.
-		const maxBodyRows = Math.max(3, this.lastViewport);
+		// Full-screen body: fill all rows between the title and footer chrome.
+		const maxBodyRows = this.bodyRows();
 		const maxScroll = Math.max(0, content.length - maxBodyRows);
 		if (this.scroll > maxScroll) this.scroll = maxScroll;
 		const visible = content.slice(this.scroll, this.scroll + maxBodyRows);
@@ -253,7 +288,7 @@ export class TweetDetailOverlay implements Component, Focusable {
 			maxScroll > 0
 				? ` ${this.scroll + 1}-${this.scroll + visible.length}/${content.length} ·`
 				: "";
-		const hint = `${more} ↑/↓ scroll · Enter detail · Esc close`;
+		const hint = `${more} ↑/↓/touchpad scroll · PgUp/PgDn page · Enter detail · Esc close`;
 		const footer = this.actionStatus
 			? `${hint} · ${this.actionStatus.message}`
 			: hint;
@@ -299,9 +334,5 @@ export class TweetDetailOverlay implements Component, Focusable {
 			out += ch;
 		}
 		return out;
-	}
-
-	setViewport(rows: number): void {
-		this.lastViewport = Math.max(3, rows);
 	}
 }

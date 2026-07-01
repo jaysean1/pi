@@ -44,7 +44,8 @@ credential handling is needed. Verify with `twitter whoami`.
   cached tweets every **30 s** locally. Rotation pauses
   while the preview is focused. After 10 minutes without a successful refresh the
   bar shows `(stale)`.
-- **View** → read-only overlay of the current tweet + replies (`twitter tweet`).
+- **View** → read-only full-screen overlay of the current tweet + replies
+  (`twitter tweet`); scroll with **↑/↓**, **PgUp/PgDn**, or the **touchpad**.
 - **View action**: press **Enter** to open the tweet in a normal **Google
   Chrome** tab that is navigated **in place**. AppleScript first reuses the tab
   this extension used last time, then an existing `x.com` / `twitter.com` tab,
@@ -53,8 +54,13 @@ credential handling is needed. Verify with `twitter whoami`.
   and rejected: Chrome PWA windows expose no scriptable URL and x.com's
   `launch_handler` opens a new app window per launch, so the PWA cannot be
   updated in place — only swapped, which flashes windows.)
-- **All** → full-screen, scrollable list of the cached hot tweets; `Enter` opens
-  a tweet's detail, **r** refreshes recent hot tweets, `Esc` returns to the list.
+- **All** → full-screen, scrollable list of the cached hot tweets; scroll with
+  **↑/↓**, **PgUp/PgDn**, or the **touchpad**, `Enter` opens a tweet's detail,
+  **r** refreshes recent hot tweets, `Esc` returns to the list.
+
+Both overlays open full-screen (`width/maxHeight 100%`, anchored top-left) so they
+don't collide with other centered overlays, and enable terminal mouse reporting
+for two-finger touchpad / wheel scrolling (restored on close).
 - Everything is best-effort: any CLI/network failure falls back to the previous
   cache and never throws into the session.
 

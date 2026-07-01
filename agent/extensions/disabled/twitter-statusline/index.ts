@@ -407,25 +407,21 @@ end run`;
 	): Promise<void> {
 		try {
 			await ctx.ui.custom<undefined>(
-				(tui, theme, _kb, done) => {
-					const overlay = new TweetDetailOverlay(
+				(tui, theme, _kb, done) =>
+					new TweetDetailOverlay(
 						tui,
 						theme,
 						tweet,
 						() => done(undefined),
 						openTweetInChrome,
-					);
-					overlay.setViewport(14);
-					return overlay;
-				},
+					),
 				{
 					overlay: true,
 					overlayOptions: {
-						anchor: "center",
-						width: "72%",
-						minWidth: 56,
-						maxHeight: "82%",
-						margin: 2,
+						anchor: "top-left",
+						width: "100%",
+						maxHeight: "100%",
+						margin: 0,
 					},
 					onHandle: (handle) => handle.focus(),
 				},
@@ -454,11 +450,10 @@ end run`;
 					{
 						overlay: true,
 						overlayOptions: {
-							anchor: "center",
-							width: "86%",
-							minWidth: 60,
-							maxHeight: "88%",
-							margin: 1,
+							anchor: "top-left",
+							width: "100%",
+							maxHeight: "100%",
+							margin: 0,
 						},
 						onHandle: (handle) => handle.focus(),
 					},

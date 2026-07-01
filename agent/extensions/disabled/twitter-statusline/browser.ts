@@ -12,6 +12,11 @@ import {
 	type TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import {
+	enableMouseWheel,
+	isMouseSequence,
+	parseWheelEvents,
+} from "./mouse.ts";
 import { authorLabel, fitWidth, metricsPlain, singleLine } from "./render.ts";
 import type { Tweet } from "./twitter-cli.ts";
 
@@ -24,7 +29,9 @@ export interface BrowserRefreshResult {
 	error: string | undefined;
 }
 
-const VISIBLE_ITEMS = 9;
+// Fixed chrome around the scrollable list: top border, title, divider, footer
+// divider, footer hint, bottom border. Each tweet item occupies two rows.
+const CHROME_ROWS = 6;
 type RefreshStatus = { kind: "info" | "error"; message: string };
 
 function stripAnsi(s: string): string {
@@ -50,6 +57,7 @@ export class TwitterBrowserOverlay implements Component, Focusable {
 	private offset = 0;
 	private refreshing = false;
 	private refreshStatus: RefreshStatus | undefined;
+	private readonly disableMouse: () => void;
 
 	constructor(
 		private readonly tui: TUI,
@@ -57,15 +65,48 @@ export class TwitterBrowserOverlay implements Component, Focusable {
 		private tweets: Tweet[],
 		private readonly done: (result: BrowserResult) => void,
 		private readonly refreshFeed: () => Promise<BrowserRefreshResult>,
-	) {}
+	) {
+		// Touchpad two-finger scrolling arrives as wheel reports once mouse
+		// reporting is on. dispose() restores the terminal; ui.custom calls it
+		// automatically when the overlay closes.
+		this.disableMouse = enableMouseWheel(tui.terminal);
+	}
+
+	// Items that fit the current full-screen height (two rows per tweet).
+	private visibleItems(): number {
+		const body = Math.max(2, this.tui.terminal.rows - CHROME_ROWS);
+		return Math.max(1, Math.floor(body / 2));
+	}
+
+	dispose(): void {
+		this.disableMouse();
+	}
 
 	invalidate(): void {
 		this.tui.requestRender();
 	}
 
 	handleInput(data: string): void {
+		// Touchpad / wheel scrolls the list selection; aggregate batched reports.
+		const wheel = parseWheelEvents(data);
+		if (wheel.length > 0) {
+			let delta = 0;
+			for (const direction of wheel) delta += direction === "down" ? 1 : -1;
+			if (delta !== 0) this.scrollBy(delta);
+			return;
+		}
+		// Swallow click/release reports so they never reach key matching.
+		if (isMouseSequence(data)) return;
 		if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
 			this.done({ type: "close" });
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.scrollBy(-this.visibleItems());
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scrollBy(this.visibleItems());
 			return;
 		}
 		if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
@@ -86,13 +127,29 @@ export class TwitterBrowserOverlay implements Component, Focusable {
 		}
 	}
 
+	// Arrow / j-k navigation: wraps around the ends like a carousel.
 	private move(delta: number): void {
 		if (this.tweets.length === 0) return;
 		this.selected =
 			(this.selected + delta + this.tweets.length) % this.tweets.length;
+		this.followSelection();
+	}
+
+	// Wheel / PgUp / PgDn: clamps at the ends (no wrap) for natural scrolling.
+	private scrollBy(delta: number): void {
+		if (this.tweets.length === 0) return;
+		this.selected = Math.max(
+			0,
+			Math.min(this.tweets.length - 1, this.selected + delta),
+		);
+		this.followSelection();
+	}
+
+	private followSelection(): void {
+		const visible = this.visibleItems();
 		if (this.selected < this.offset) this.offset = this.selected;
-		else if (this.selected >= this.offset + VISIBLE_ITEMS) {
-			this.offset = this.selected - VISIBLE_ITEMS + 1;
+		else if (this.selected >= this.offset + visible) {
+			this.offset = this.selected - visible + 1;
 		}
 		this.tui.requestRender();
 	}
@@ -146,31 +203,34 @@ export class TwitterBrowserOverlay implements Component, Focusable {
 		lines.push(this.row(border, innerW, th.bold(th.fg("accent", title))));
 		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
 
+		// Fill the full-screen height: the body region is exactly bodyRows tall,
+		// padded with blank rows so the footer stays pinned to the bottom edge.
+		const bodyRows = Math.max(2, this.tui.terminal.rows - CHROME_ROWS);
+		const visible = this.visibleItems();
+		const body: string[] = [];
 		if (this.tweets.length === 0) {
-			lines.push(
-				this.row(
-					border,
-					innerW,
-					th.fg("dim", "no cached tweets — try /twitter refresh"),
-				),
-			);
+			body.push(th.fg("dim", "no cached tweets — try /twitter refresh"));
 		} else {
-			const end = Math.min(this.tweets.length, this.offset + VISIBLE_ITEMS);
+			const maxOffset = Math.max(0, this.tweets.length - visible);
+			if (this.offset > maxOffset) this.offset = maxOffset;
+			const end = Math.min(this.tweets.length, this.offset + visible);
 			for (let i = this.offset; i < end; i++) {
 				const tweet = this.tweets[i];
 				if (!tweet) continue;
 				const [a, b] = this.renderItem(tweet, i, innerW);
-				lines.push(this.row(border, innerW, a));
-				lines.push(this.row(border, innerW, b));
+				body.push(a, b);
 			}
 		}
+		while (body.length < bodyRows) body.push("");
+		for (const c of body.slice(0, bodyRows))
+			lines.push(this.row(border, innerW, c));
 
 		lines.push(border("├") + border("─".repeat(innerW)) + border("┤"));
 		const pos =
 			this.tweets.length > 0
 				? ` ${this.selected + 1}/${this.tweets.length} ·`
 				: "";
-		const hint = `${pos} ↑/↓ select · Enter view · r refresh · Esc close`;
+		const hint = `${pos} ↑/↓/touchpad select · Enter view · r refresh · Esc close`;
 		const footer = this.refreshStatus
 			? `${hint} · ${this.refreshStatus.message}`
 			: hint;
