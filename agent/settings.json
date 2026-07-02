@@ -1,18 +1,25 @@
 {
-  "defaultModel": "claude-opus-4-8",
+  "defaultModel": "claude-fable-5",
   "defaultProvider": "anthropic",
   "defaultThinkingLevel": "xhigh",
-  "lastChangelogVersion": "0.80.2",
+  "lastChangelogVersion": "0.80.3",
   "packages": [
-    "npm:pi-web-access",
-    "npm:@juicesharp/rpiv-ask-user-question",
-    "npm:@juicesharp/rpiv-todo",
+    {
+      "source": "npm:pi-web-access",
+      "skills": []
+    },
     "extensions/anthropic-subscription-prompt-cleaner",
     "npm:@guwidoe/pi-prompt-suggester",
     "npm:@diegopetrucci/pi-openai-fast",
     "/Users/jayseanqian/.vibe-island/pi-extension",
     "npm:@schultzp2020/pi-cursor",
-    "git:github.com/DietrichGebert/ponytail@6da37bfa7d0282522c7785759f4d2f1544015354"
+    {
+      "source": "git:github.com/DietrichGebert/ponytail@6da37bfa7d0282522c7785759f4d2f1544015354",
+      "skills": [
+        "skills/ponytail"
+      ]
+    },
+    "npm:pi-codex-image-gen"
   ],
   "quietStartup": true,
   "terminal": {

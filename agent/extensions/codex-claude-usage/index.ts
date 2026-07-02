@@ -4,30 +4,27 @@
 // percentage plus a countdown to the next reset, e.g.
 //   Codex | 5h: 2% (15h) | 7d: 11% (6d) · Claude | 5h: 0% (1h40m) | 7d: 4% (4d11h)
 //
-// Data sources (both local to this machine):
+// Data sources:
 //   Codex  - latest ~/.codex/sessions rollout file, last token_count.rate_limits
-//   Claude - Vibe Island cache first, then Anthropic OAuth endpoint as fallback
+//   Claude - Anthropic OAuth usage endpoint, authenticated via Pi's auth.json
 //
 // Manual refresh: /usage
 
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "codex-claude-usage";
 const REFRESH_MS = 60_000;
 const CODEX_TAIL_BYTES = 512 * 1024;
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-const KEYCHAIN_SERVICE = "Claude Code-credentials";
-const CLAUDE_CACHE_STALE_MS = 30 * 60 * 1000;
-const VIBE_ISLAND_CACHE_DIR = path.join(os.homedir(), ".vibe-island", "cache");
-const CLAUDE_USAGE_CACHE = path.join(VIBE_ISLAND_CACHE_DIR, "usage-persist-anthropic.json");
-const CLAUDE_RATE_LIMIT_CACHE = path.join(VIBE_ISLAND_CACHE_DIR, "rl.json");
-
-const execFileAsync = promisify(execFile);
+const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+const PI_AUTH_PATH = path.join(PI_AGENT_DIR, "auth.json");
+// The OAuth /usage endpoint is aggressively rate-limited (429 with no real
+// retry-after). Poll it hourly; manual /usage can force a refresh.
+const OAUTH_MIN_INTERVAL_MS = 60 * 60 * 1000;
+const OAUTH_MAX_BACKOFF_MS = 60 * 60 * 1000;
 
 interface Window {
 	/** Used percentage, 0-100. */
@@ -156,7 +153,7 @@ export function readCodexUsage(): Usage | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Claude: read local Vibe Island cache first, then query OAuth endpoint
+// Claude: query Anthropic OAuth usage endpoint directly
 // ---------------------------------------------------------------------------
 
 function toEpochMs(raw: unknown): number {
@@ -182,74 +179,23 @@ function toClaudeWindow(raw: unknown): Window | undefined {
 	return { pct, resetMs: toEpochMs(r.resets_at) };
 }
 
-function readClaudeUsageCache(filePath: string, source: string, requireAnthropicProvider: boolean): Usage | undefined {
-	let text: string;
-	let mtimeMs = NaN;
+async function readClaudeToken(ctx?: ExtensionContext): Promise<string | undefined> {
 	try {
-		const stat = fs.statSync(filePath);
-		mtimeMs = stat.mtimeMs;
-		text = fs.readFileSync(filePath, "utf8");
-	} catch {
-		return undefined;
-	}
-
-	let data: {
-		fetched_at?: unknown;
-		five_hour?: unknown;
-		provider?: unknown;
-		seven_day?: unknown;
-	};
-	try {
-		data = JSON.parse(text);
-	} catch {
-		return undefined;
-	}
-	if (requireAnthropicProvider && data.provider !== "anthropic") return undefined;
-
-	const fiveHour = toClaudeWindow(data.five_hour);
-	const sevenDay = toClaudeWindow(data.seven_day);
-	if (!fiveHour && !sevenDay) return undefined;
-
-	const fetchedMs = toEpochMs(data.fetched_at);
-	const updatedMs = Number.isFinite(fetchedMs) ? fetchedMs : mtimeMs;
-	const stale = Number.isFinite(updatedMs)
-		? Date.now() - updatedMs > CLAUDE_CACHE_STALE_MS
-		: true;
-	return { fiveHour, sevenDay, source, stale, updatedMs };
-}
-
-export function readClaudeCachedUsage(): Usage | undefined {
-	const persisted = readClaudeUsageCache(
-		CLAUDE_USAGE_CACHE,
-		"usage-persist-anthropic",
-		true,
-	);
-	if (persisted && !persisted.stale) return persisted;
-
-	const bridge = readClaudeUsageCache(CLAUDE_RATE_LIMIT_CACHE, "rl", false);
-	if (!persisted) return bridge;
-	if (!bridge) return persisted;
-	if (!bridge.stale) return bridge;
-	return (bridge.updatedMs ?? 0) > (persisted.updatedMs ?? 0) ? bridge : persisted;
-}
-
-async function readClaudeToken(): Promise<string | undefined> {
-	try {
-		const { stdout } = await execFileAsync(
-			"security",
-			["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-			{ timeout: 5000 },
-		);
-		const parsed = JSON.parse(stdout) as { claudeAiOauth?: { accessToken?: string } };
-		return parsed.claudeAiOauth?.accessToken || undefined;
+		const storage = ctx?.modelRegistry.authStorage ?? AuthStorage.create(PI_AUTH_PATH);
+		return await storage.getApiKey("anthropic");
 	} catch {
 		return undefined;
 	}
 }
 
-export async function fetchClaudeUsage(): Promise<Usage | undefined> {
-	const token = await readClaudeToken();
-	if (!token) return undefined;
+interface FetchResult {
+	usage?: Usage;
+	rateLimited?: boolean;
+}
+
+export async function fetchClaudeUsage(ctx?: ExtensionContext): Promise<FetchResult> {
+	const token = await readClaudeToken(ctx);
+	if (!token) return {};
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), 10_000);
@@ -262,20 +208,43 @@ export async function fetchClaudeUsage(): Promise<Usage | undefined> {
 			},
 			signal: controller.signal,
 		});
-		if (!res.ok) return undefined;
+		if (res.status === 429) return { rateLimited: true };
+		if (res.status === 401 || res.status === 403) return {};
+		if (!res.ok) return {};
 		const data = (await res.json()) as {
 			five_hour?: { utilization?: number; resets_at?: string };
 			seven_day?: { utilization?: number; resets_at?: string };
 		};
 		const fiveHour = toClaudeWindow(data.five_hour);
 		const sevenDay = toClaudeWindow(data.seven_day);
-		if (!fiveHour && !sevenDay) return undefined;
-		return { fiveHour, sevenDay, source: "oauth", stale: false, updatedMs: Date.now() };
+		if (!fiveHour && !sevenDay) return {};
+		return {
+			usage: { fiveHour, sevenDay, source: "oauth", stale: false, updatedMs: Date.now() },
+		};
 	} catch {
-		return undefined;
+		return {};
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+let oauthNextAllowedMs = 0;
+let oauthBackoffMs = OAUTH_MIN_INTERVAL_MS;
+
+// Gate + back off the rate-limited endpoint. ponytail: in-memory gate, fine for
+// one statusline process; persist to disk if multiple processes start sharing.
+export async function refreshClaudeViaOAuth(ctx: ExtensionContext, force = false): Promise<Usage | undefined> {
+	if (!force && Date.now() < oauthNextAllowedMs) return undefined;
+	const result = await fetchClaudeUsage(ctx);
+	if (result.usage) {
+		oauthBackoffMs = OAUTH_MIN_INTERVAL_MS;
+		oauthNextAllowedMs = Date.now() + OAUTH_MIN_INTERVAL_MS;
+		return result.usage;
+	}
+	// 429 or any miss: wait at least the min interval; double up to the cap on 429.
+	if (result.rateLimited) oauthBackoffMs = Math.min(oauthBackoffMs * 2, OAUTH_MAX_BACKOFF_MS);
+	oauthNextAllowedMs = Date.now() + (result.rateLimited ? oauthBackoffMs : OAUTH_MIN_INTERVAL_MS);
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +306,16 @@ export default function (pi: ExtensionAPI) {
 	let lastClaude: Usage | undefined;
 	let activeCtx: ExtensionContext | undefined;
 
-	async function refresh(ctx: ExtensionContext): Promise<void> {
+	function render(ctx: ExtensionContext): void {
+		const theme = ctx.ui.theme;
+		const line = [
+			paintTool(theme, "Codex", lastCodex),
+			paintTool(theme, "Claude", lastClaude),
+		].join(paintToolSeparator(theme));
+		ctx.ui.setStatus(STATUS_KEY, line);
+	}
+
+	async function refresh(ctx: ExtensionContext, forceClaude = false): Promise<void> {
 		if (!ctx.hasUI || inFlight) return;
 		inFlight = true;
 		try {
@@ -348,20 +326,13 @@ export default function (pi: ExtensionAPI) {
 				codex = undefined;
 			}
 			if (codex) lastCodex = codex;
+			render(ctx);
 
-			let claude = readClaudeCachedUsage();
-			if (!claude || claude.stale) {
-				const liveClaude = await fetchClaudeUsage();
-				if (liveClaude) claude = liveClaude;
+			const claude = await refreshClaudeViaOAuth(ctx, forceClaude);
+			if (claude) {
+				lastClaude = claude;
+				render(ctx);
 			}
-			if (claude) lastClaude = claude;
-
-			const theme = ctx.ui.theme;
-				const line = [
-					paintTool(theme, "Codex", lastCodex),
-					paintTool(theme, "Claude", lastClaude),
-				].join(paintToolSeparator(theme));
-				ctx.ui.setStatus(STATUS_KEY, line);
 		} catch {
 			// never let the statusline crash the session
 		} finally {
@@ -400,7 +371,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("usage", {
 		description: "Refresh the Codex / Claude usage statusline",
 		handler: async (_args, ctx) => {
-			await refresh(ctx);
+			await refresh(ctx, true);
 			ctx.ui.notify("Usage statusline refreshed", "info");
 		},
 	});

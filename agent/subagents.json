@@ -1,0 +1,5 @@
+{
+  "maxConcurrent": 4,
+  "defaultJoinMode": "smart",
+  "toolDescriptionMode": "compact"
+}

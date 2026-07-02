@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { streamSimple, type UserMessage } from "@earendil-works/pi-ai";
+import { streamSimple, type UserMessage } from "@earendil-works/pi-ai/compat";
 import type { EditorComponent } from "@earendil-works/pi-tui";
 import { EXTENSION_ID, REWRITE_TIMEOUT_MS } from "../core/config.ts";
 import { resolveModel } from "../core/model-resolver.ts";

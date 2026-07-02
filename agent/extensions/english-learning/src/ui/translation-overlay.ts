@@ -229,6 +229,8 @@ export class TranslationOverlay implements Component {
 		private readonly theme: Theme,
 		private readonly segments: TranslationSegment[],
 		private readonly options: {
+			sourceLanguageLabel: string;
+			targetLanguageLabel: string;
 			modelLabel: string;
 			translatableCount: number;
 			codeBlockCount: number;
@@ -387,7 +389,10 @@ export class TranslationOverlay implements Component {
 					: this.runStatus === "done"
 						? "success"
 						: "accent";
-		const title = th.fg("toolTitle", th.bold("Translate")) + th.fg("muted", " · Side-by-side diff · Last assistant response");
+		const title = th.fg("toolTitle", th.bold("Translate")) + th.fg(
+			"muted",
+			` · ${this.options.sourceLanguageLabel} → ${this.options.targetLanguageLabel} · Side-by-side diff · Last assistant response`,
+		);
 		const codeSummary = this.options.codeBlockCount > 0
 			? `</> ${plural(this.options.codeBlockCount, "code block")} shown once`
 			: "</> 0 code blocks";
@@ -495,8 +500,18 @@ export class TranslationOverlay implements Component {
 	): void {
 		const { leftWidth, rightWidth } = this.diffColumnWidths(width);
 		const separator = this.theme.fg("borderMuted", DIFF_SEPARATOR);
-		const leftTitle = this.renderCellLine("Original", leftWidth, "original", { title: true });
-		const rightTitle = this.renderCellLine("Translation", rightWidth, translationTone, { title: true });
+		const leftTitle = this.renderCellLine(
+			`Original · ${this.options.sourceLanguageLabel}`,
+			leftWidth,
+			"original",
+			{ title: true },
+		);
+		const rightTitle = this.renderCellLine(
+			this.options.targetLanguageLabel,
+			rightWidth,
+			translationTone,
+			{ title: true },
+		);
 		lines.push(leftTitle + separator + rightTitle);
 
 		const leftRows = this.renderCellLines(original, leftWidth, "original");

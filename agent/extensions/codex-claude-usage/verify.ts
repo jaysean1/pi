@@ -3,7 +3,6 @@ import {
 	fetchClaudeUsage,
 	formatReset,
 	latestCodexRollout,
-	readClaudeCachedUsage,
 	readCodexUsage,
 } from "./index.ts";
 
@@ -26,8 +25,8 @@ console.log("codex rollout file:", rollout ?? "(none found)");
 const codex = readCodexUsage();
 console.log("codex usage:", describeUsage(codex));
 
-const cachedClaude = readClaudeCachedUsage();
-console.log("claude cached usage:", describeUsage(cachedClaude));
-
 const claude = await fetchClaudeUsage();
-console.log("claude oauth usage:", describeUsage(claude));
+console.log(
+	"claude oauth usage:",
+	claude.rateLimited ? "(rate limited / 429)" : describeUsage(claude.usage),
+);

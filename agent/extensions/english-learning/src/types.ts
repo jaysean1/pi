@@ -11,6 +11,8 @@ export type TranslationStatus =
 	| "done"
 	| "error";
 
+export type TranslationDirection = "en-to-zh" | "zh-to-en";
+
 export interface SegmentBase {
 	id: number;
 	kind: TranslationSegmentKind;

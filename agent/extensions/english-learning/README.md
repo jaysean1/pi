@@ -5,8 +5,8 @@ A Pi TUI extension for English learning.
 ## Features
 
 - `Tab` while the input editor has non-empty normal text: rewrite Chinese/English input into natural English.
-- `Command+Shift+M`: toggle a full-screen segmented translation overlay for the last assistant response. In Kaku this is forwarded as the private sequence `\x1b[993~`, matching the session/diff shortcut style.
-- `/english translate [--force]`: command fallback for terminals that do not send shortcut events.
+- `Command+Shift+M`: toggle a full-screen segmented translation overlay for the last assistant response. English responses translate to Simplified Chinese; Chinese responses translate to English. In Kaku this is forwarded as the private sequence `\x1b[993~`, matching the session/diff shortcut style.
+- `/english translate [--force]`: command fallback for terminals that do not send shortcut events; `--force` is kept for compatibility because direction is now auto-detected.
 - `/english clear-cache`: clear cached full-screen translations.
 - `/english debug-keys`: print raw key bytes for debugging shortcut support.
 
@@ -16,12 +16,12 @@ The overlay shows the assistant response in original order as a side-by-side dif
 
 - The header shows translation progress, text/code segment counts, current status, and the model channel as `(provider) model`.
 - The overlay opens anchored at the top of the content (first segment), not the bottom.
-- Original text appears in the left `Original` column with a warm background and left rail.
-- Chinese translation appears in the right `Translation` column with a green background and left rail.
+- Original text appears in the left `Original · <language>` column with a warm background and left rail.
+- The right column shows the detected target language (`Simplified Chinese` or `English`) with a green background and left rail.
 - Both columns render basic Markdown: headings, bold/italic/strikethrough, inline code, links, ordered/unordered lists, blockquotes, and horizontal rules, using a palette tuned for the pastel card backgrounds.
 - Markdown code blocks appear once in `Code shown once` blocks; they are not sent to the model and are not translated.
 - Related Markdown blocks are grouped into larger sections before translation, so headings, paragraphs, quotes, and lists stay readable instead of becoming many tiny cards.
-- Translation streams into the matching `Translation` column when the model emits tagged output.
+- Translation streams into the matching target-language column when the model emits tagged output.
 - Successful translations are cached in memory and reused when the same assistant response is opened again. The cache keeps the latest 50 responses and evicts older entries automatically.
 - `Esc` or `Command+Shift+M` closes the overlay. Closing while streaming cancels the model request.
 - Scroll with `↑/↓`, `PgUp/PgDn`, `g/G`, or touchpad/mouse wheel when the terminal supports mouse reporting.

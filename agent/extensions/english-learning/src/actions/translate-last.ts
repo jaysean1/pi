@@ -1,18 +1,22 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { streamSimple, type UserMessage } from "@earendil-works/pi-ai";
+import { streamSimple, type UserMessage } from "@earendil-works/pi-ai/compat";
 import { MAX_TRANSLATE_CHARS, OPENAI_SUBSCRIPTION_PROVIDER, TRANSLATE_TIMEOUT_MS } from "../core/config.ts";
 import { getLastAssistantText } from "../core/last-assistant.ts";
 import { segmentMarkdown } from "../core/markdown-segments.ts";
 import { resolveModelCandidates } from "../core/model-resolver.ts";
-import { buildTranslateUserPrompt, TRANSLATE_SYSTEM_PROMPT } from "../core/prompts.ts";
+import {
+	buildTranslateSystemPrompt,
+	buildTranslateUserPrompt,
+	getTranslationDirectionLabels,
+} from "../core/prompts.ts";
 import { SegmentTranslationParser } from "../core/stream-protocol.ts";
-import { estimateMaxTokensFromChars, isLikelyEnglish, textFromContent } from "../core/text-utils.ts";
+import { detectTranslationDirection, estimateMaxTokensFromChars, textFromContent } from "../core/text-utils.ts";
 import {
 	applyCachedTranslations,
 	getCachedTranslations,
 	storeCachedTranslations,
 } from "../core/translation-cache.ts";
-import type { ModelChoice, TranslationCloseReason, TranslationSegment } from "../types.ts";
+import type { ModelChoice, TranslationCloseReason, TranslationDirection, TranslationSegment } from "../types.ts";
 import { TranslationOverlay } from "../ui/translation-overlay.ts";
 
 interface ActiveOverlay {
@@ -48,6 +52,8 @@ export async function openOrToggleTranslation(
 	ctx: ExtensionContext,
 	options: { force?: boolean } = {},
 ): Promise<void> {
+	// Kept for backward-compatible `/english translate --force`; direction is now auto-detected.
+	void options;
 	if (activeOverlay) {
 		activeOverlay.close("toggle");
 		return;
@@ -72,10 +78,8 @@ export async function openOrToggleTranslation(
 		ctx.ui.notify(`Last assistant message is too long to translate (${last.text.length} chars).`, "error");
 		return;
 	}
-	if (!options.force && !isLikelyEnglish(last.text)) {
-		ctx.ui.notify("Last assistant message does not look like English. Use /english translate --force to override.", "warning");
-		return;
-	}
+	const direction = detectTranslationDirection(last.text);
+	const labels = getTranslationDirectionLabels(direction);
 
 	const segmentation = segmentMarkdown(last.text);
 	if (segmentation.segments.length === 0) {
@@ -83,7 +87,7 @@ export async function openOrToggleTranslation(
 		return;
 	}
 
-	const cached = getCachedTranslations(last.text, segmentation.segments);
+	const cached = getCachedTranslations(last.text, direction, segmentation.segments);
 	if (cached) applyCachedTranslations(cached, segmentation.segments);
 
 	const candidates = !cached && segmentation.translatableCount > 0 ? resolveModelCandidates(ctx, "translate") : [];
@@ -109,6 +113,8 @@ export async function openOrToggleTranslation(
 		await ctx.ui.custom<TranslationCloseReason>(
 			(tui, theme, _keybindings, done) => {
 				overlay = new TranslationOverlay(tui, theme, segmentation.segments, {
+					sourceLanguageLabel: labels.sourceLanguageLabel,
+					targetLanguageLabel: labels.targetLanguageLabel,
 					modelLabel: cached
 						? `${cached.modelLabel} · cached`
 						: candidates[0]
@@ -130,7 +136,15 @@ export async function openOrToggleTranslation(
 						overlay.setRunStatus("done", `Loaded ${segmentation.translatableCount} segment(s) from cache.`);
 						return;
 					}
-					void runSegmentedTranslation(ctx, overlay, segmentation.segments, candidates, controller.signal, last.text);
+					void runSegmentedTranslation(
+						ctx,
+						overlay,
+						segmentation.segments,
+						candidates,
+						controller.signal,
+						last.text,
+						direction,
+					);
 				});
 
 				return overlay;
@@ -163,14 +177,16 @@ async function runSegmentedTranslation(
 	candidates: ModelChoice[],
 	signal: AbortSignal,
 	sourceText: string,
+	direction: TranslationDirection,
 ): Promise<void> {
-	const promptText = buildTranslateUserPrompt(segments);
+	const promptText = buildTranslateUserPrompt(segments, direction);
 	const userMessage: UserMessage = {
 		role: "user",
 		content: [{ type: "text", text: promptText }],
 		timestamp: Date.now(),
 	};
 
+	const systemPrompt = buildTranslateSystemPrompt(direction);
 	const failures: string[] = [];
 	for (let i = 0; i < candidates.length; i++) {
 		const choice = candidates[i]!;
@@ -190,8 +206,17 @@ async function runSegmentedTranslation(
 
 		const before = hasAnyTranslatedText(segments);
 		try {
-			await runSingleModelTranslation(overlay, segments, choice, auth, userMessage, promptText, signal);
-			const cached = storeCachedTranslations(sourceText, segments, formatOverlayModelLabel(choice));
+			await runSingleModelTranslation(
+				overlay,
+				segments,
+				choice,
+				auth,
+				userMessage,
+				promptText,
+				systemPrompt,
+				signal,
+			);
+			const cached = storeCachedTranslations(sourceText, direction, segments, formatOverlayModelLabel(choice));
 			overlay.setRunStatus("done", cached ? "Done · cached for reuse" : "Done");
 			return;
 		} catch (error) {
@@ -232,6 +257,7 @@ async function runSingleModelTranslation(
 	auth: ResolvedAuth,
 	userMessage: UserMessage,
 	promptText: string,
+	systemPrompt: string,
 	signal: AbortSignal,
 ): Promise<void> {
 	let rawOutput = "";
@@ -244,7 +270,7 @@ async function runSingleModelTranslation(
 	const stream = streamSimple(
 		choice.model,
 		{
-			systemPrompt: TRANSLATE_SYSTEM_PROMPT,
+			systemPrompt,
 			messages: [userMessage],
 		},
 		{

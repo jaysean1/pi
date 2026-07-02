@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { TRANSLATION_CACHE_MAX_ENTRIES } from "./config.ts";
-import type { TranslatableSegment, TranslationSegment } from "../types.ts";
+import type { TranslatableSegment, TranslationDirection, TranslationSegment } from "../types.ts";
 
-const GLOBAL_STATE_KEY = "__englishLearningTranslationCache";
-const CACHE_VERSION = "translation-v2";
+const GLOBAL_STATE_KEY = "__englishLearningTranslationCacheV3";
+const CACHE_VERSION = "translation-v3";
 
 interface CachedSegmentTranslation {
 	source: string;
@@ -15,6 +15,7 @@ export interface TranslationCacheEntry {
 	createdAt: number;
 	lastAccessedAt: number;
 	modelLabel: string;
+	direction: TranslationDirection;
 	segments: CachedSegmentTranslation[];
 }
 
@@ -31,9 +32,11 @@ function translatableSegments(segments: TranslationSegment[]): TranslatableSegme
 	return segments.filter((segment): segment is TranslatableSegment => segment.translatable);
 }
 
-function cacheKey(text: string): string {
+function cacheKey(text: string, direction: TranslationDirection): string {
 	return createHash("sha256")
 		.update(CACHE_VERSION)
+		.update("\0")
+		.update(direction)
 		.update("\0")
 		.update(text)
 		.digest("hex");
@@ -55,7 +58,12 @@ function trimCache(): void {
 	}
 }
 
-function matchesSegments(entry: TranslationCacheEntry, segments: TranslationSegment[]): boolean {
+function matchesSegments(
+	entry: TranslationCacheEntry,
+	direction: TranslationDirection,
+	segments: TranslationSegment[],
+): boolean {
+	if (entry.direction !== direction) return false;
 	const translatable = translatableSegments(segments);
 	if (translatable.length !== entry.segments.length) return false;
 	return translatable.every((segment, index) => segment.source === entry.segments[index]?.source);
@@ -63,13 +71,14 @@ function matchesSegments(entry: TranslationCacheEntry, segments: TranslationSegm
 
 export function getCachedTranslations(
 	text: string,
+	direction: TranslationDirection,
 	segments: TranslationSegment[],
 ): TranslationCacheEntry | undefined {
 	const entries = state().entries;
-	const key = cacheKey(text);
+	const key = cacheKey(text, direction);
 	const entry = entries.get(key);
 	if (!entry) return undefined;
-	if (!matchesSegments(entry, segments)) {
+	if (!matchesSegments(entry, direction, segments)) {
 		entries.delete(key);
 		return undefined;
 	}
@@ -97,6 +106,7 @@ export function applyCachedTranslations(
 
 export function storeCachedTranslations(
 	text: string,
+	direction: TranslationDirection,
 	segments: TranslationSegment[],
 	modelLabel: string,
 ): TranslationCacheEntry | undefined {
@@ -107,12 +117,13 @@ export function storeCachedTranslations(
 	}
 
 	const now = Date.now();
-	const key = cacheKey(text);
+	const key = cacheKey(text, direction);
 	const entry: TranslationCacheEntry = {
 		key,
 		createdAt: now,
 		lastAccessedAt: now,
 		modelLabel,
+		direction,
 		segments: translatable.map((segment) => ({
 			source: segment.source,
 			translation: segment.translation.trimEnd(),

@@ -1,3 +1,5 @@
+import type { TranslationDirection } from "../types.ts";
+
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/g;
 const LATIN_RE = /[A-Za-z]/g;
 const LETTER_RE = /[A-Za-z\u3400-\u9fff\uf900-\ufaff]/g;
@@ -15,6 +17,19 @@ export function isLikelyEnglish(text: string): boolean {
 	const latin = withoutCode.match(LATIN_RE)?.length ?? 0;
 	const cjk = withoutCode.match(CJK_RE)?.length ?? 0;
 	return latin / Math.max(1, letters) >= 0.55 && cjk / Math.max(1, withoutCode.length) < 0.12;
+}
+
+export function detectTranslationDirection(text: string): TranslationDirection {
+	const withoutCode = stripFencedCodeBlocks(text);
+	const latin = withoutCode.match(LATIN_RE)?.length ?? 0;
+	const cjk = withoutCode.match(CJK_RE)?.length ?? 0;
+	const letters = latin + cjk;
+
+	// Treat Chinese-only snippets and meaningful Chinese presence as Chinese-first
+	// even when mixed with English identifiers, paths, commands, or product names.
+	if (cjk > 0 && latin === 0) return "zh-to-en";
+	if (cjk >= 4 && cjk / Math.max(1, letters) >= 0.2) return "zh-to-en";
+	return "en-to-zh";
 }
 
 export function shouldSkipInputRewrite(text: string): boolean {

@@ -49,7 +49,7 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 	};
 
 	const translateShortcut = {
-		description: "Translate the last English assistant response segment-by-segment",
+		description: "Translate the last assistant response Chinese↔English segment-by-segment",
 		handler: (ctx: ExtensionContext) => toggleTranslationFromShortcut(ctx),
 	};
 	pi.registerShortcut(TRANSLATE_KEY, translateShortcut);
