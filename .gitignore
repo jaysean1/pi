@@ -20,9 +20,17 @@ agent/bin/
 # Cursor / Pi Studio runtime
 agent/cursor-model-cache.json
 agent/cursor-proxy.json
+agent/cursor-config.json
 agent/run-history.jsonl
 pistudio-instances/
 agent/extensions/kooky.ts
+
+# Extension install / version state (regenerated at runtime)
+agent/extensions/pi-codex-image-gen-install.json
+
+# Build & runtime scratch products
+agent/tmp/
+agent/generated-images/
 
 # Prompt suggester generated per-project seeds
 agent/prompt-suggester/projects/
