@@ -42,7 +42,6 @@ const DEFAULTS: YtmConfig = {
 	port: 8782,
 	token: "",
 	browserProfile: "auto",
-	account: "jaysean.qian@gmail.com",
 	enginePath: "youtube-music-cli",
 };
 

@@ -5,9 +5,12 @@
 # Pi credentials, backups, and live state
 agent/auth.json
 agent/settings.json.bak.*
+agent/trust.json
 agent/state/
 agent/sessions/
 cache/
+memory.md
+web-search.json
 
 # Installed dependencies and local binaries
 **/node_modules/

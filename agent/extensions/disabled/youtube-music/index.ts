@@ -27,7 +27,6 @@ const SHORTCUT = Key.superShift("m"); // ⌘⇧M: mnemonic for Music; avoids Kak
 const SHORTCUT_LABEL = "⌘⇧M";
 const KAKU_SHORTCUT_SEQUENCE = "\x1b[993~";
 const DEBUG_KEYS_ARG = "debug-keys";
-const TARGET_ACCOUNT = "jaysean.qian@gmail.com";
 // rpiv-todo registers its overlay widget when this tool executes. We re-pin our
 // bar afterwards so the todo list stacks above it instead of pushing it up.
 const TODO_WIDGET_TOOL = "todo";
@@ -46,7 +45,7 @@ async function promptManualCookie(ctx: ExtensionContext): Promise<void> {
 
 	const ok = await ctx.ui.confirm(
 		"YouTube Music manual login",
-		`Use the browser account ${TARGET_ACCOUNT}, then paste only the music.youtube.com Cookie header locally. Do not paste your Google password. Continue?`,
+		"Paste only the music.youtube.com Cookie header locally. Do not paste your Google password. Continue?",
 	);
 	if (!ok) return;
 
@@ -58,7 +57,7 @@ async function promptManualCookie(ctx: ExtensionContext): Promise<void> {
 	}
 
 	const cfg = loadConfig();
-	saveConfig({ ...cfg, account: cfg.account?.trim() || TARGET_ACCOUNT, browserProfile: "auto", cookie });
+	saveConfig({ ...cfg, browserProfile: "auto", cookie });
 	await refreshAuth(ctx);
 }
 

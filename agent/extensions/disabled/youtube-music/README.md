@@ -44,8 +44,8 @@ Command shortcuts: `/ytm`, `/ytm pause`, `/ytm next`, `/ytm prev`, `/ytm stop`, 
 
 Use this when browser auto-detect cannot pick the right account:
 
-1. Open `https://music.youtube.com` in a Chromium browser and confirm the active
-   account is `jaysean.qian@gmail.com`.
+1. Open `https://music.youtube.com` in a Chromium browser and confirm the intended
+   account is active.
 2. Open DevTools → Network, refresh the page, select any `music.youtube.com`
    request, and copy the full request header named `Cookie`.
 3. In pi, run `/ytm login` and paste that `Cookie:` header into the local editor.
@@ -73,7 +73,7 @@ an account credential. `/ytm login` stores it locally in
 |-----|---------|---------|
 | `port` | `8782` | WebSocket port for the engine daemon |
 | `browserProfile` | `"auto"` | `"auto"` scans for the YouTube-logged-in profile; or set `"Default"` / `"Profile 1"` |
-| `account` | `"jaysean.qian@gmail.com"` | Target account filter for browser auto-detect; set with `/ytm account <email>` |
+| `account` | – | Optional target account filter for browser auto-detect; set with `/ytm account <email>` |
 | `cookie` | – | Manual override: paste a full `Cookie` header from a logged-in `music.youtube.com` request via `/ytm login` (also via env `YTM_COOKIE`) |
 | `enginePath` | `"youtube-music-cli"` | Path to the engine binary |
 
@@ -84,7 +84,7 @@ an account credential. `/ytm login` stores it locally in
 - Auto-advance uses track duration as a timer (no live EOF signal from the
   daemon), so it can drift by a second or two.
 - If private playlists show *"Sign in"*, open YouTube Music in your browser and
-  log in as `jaysean.qian@gmail.com`, then run `/ytm auth`; or run `/ytm login`
+  log in with the intended account, then run `/ytm auth`; or run `/ytm login`
   and paste the full `Cookie:` header from a signed-in `music.youtube.com`
   request. Do **not** paste your Google password into pi or chat.
 

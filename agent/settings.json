@@ -1,14 +1,7 @@
 {
-  "defaultModel": "gpt-5.5",
+  "defaultModel": "gpt-5.6-sol",
   "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "high",
-  "enabledModels": [
-    "anthropic/claude-opus-4-8",
-    "anthropic/claude-sonnet-5",
-    "anthropic/claude-fable-5",
-    "openai-codex/gpt-5.5",
-    "cursor/grok-4.5-fast-xhigh"
-  ],
   "lastChangelogVersion": "0.80.6",
   "packages": [
     {
@@ -31,7 +24,7 @@
       "extensions": [
         "-dist/index.js"
       ],
-      "source": "/Users/jayseanqian/.vibe-island/pi-extension"
+      "source": "../../.vibe-island/pi-extension"
     },
     {
       "extensions": [
@@ -49,20 +42,23 @@
       ],
       "source": "npm:pi-chrome"
     },
-    "/Users/jayseanqian/.vibe-island/pi-extension"
+    "../../.vibe-island/pi-extension"
   ],
   "quietStartup": true,
   "terminal": {
-    "clearOnShrink": false,
-    "showImages": false,
-    "showTerminalProgress": true
+    "showImages": true
   },
   "theme": "light/dark",
-  "treeFilterMode": "default",
+  "treeFilterMode": "user-only",
   "warnings": {
     "anthropicExtraUsage": false
   },
   "extensions": [
     "-extensions/mermaid-ascii-view/index.ts"
+  ],
+  "enabledModels": [
+    "anthropic/claude-fable-5",
+    "anthropic/claude-opus-4-8",
+    "openai-codex/gpt-5.6-sol"
   ]
 }
