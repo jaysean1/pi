@@ -35,9 +35,14 @@ export function detectTranslationDirection(text: string): TranslationDirection {
 export function shouldSkipInputRewrite(text: string): boolean {
 	const trimmed = text.trimStart();
 	if (!trimmed) return true;
-	// Do not rewrite slash commands or user bash commands. Passing Tab through
-	// preserves Pi's built-in completion for these special input modes.
-	return trimmed.startsWith("/") || trimmed.startsWith("!");
+	// Do not rewrite slash commands, user bash commands, or an active @ file
+	// mention token. Passing Tab through preserves Pi's built-in/extension
+	// completion selectors for these special input modes.
+	return (
+		trimmed.startsWith("/") ||
+		trimmed.startsWith("!") ||
+		/(?:^|[\s(])@(?:"[^"]*|[^\s]*)$/.test(text)
+	);
 }
 
 export function normalizeRewriteOutput(text: string): string {

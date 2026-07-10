@@ -9,8 +9,22 @@ import {
 import { shouldSkipInputRewrite } from "../core/text-utils.ts";
 import { isTranslateToggleKey, isTranslateToggleKeyPress } from "../platform/keys.ts";
 
+type AutocompleteAwareEditor = EditorComponent & {
+	isShowingAutocomplete?: () => boolean;
+};
+
 function isFocusableComponent(component: Component): component is Component & Focusable {
 	return "focused" in component;
+}
+
+function isAutocompleteOpen(editor: EditorComponent): boolean {
+	return (editor as AutocompleteAwareEditor).isShowingAutocomplete?.() === true;
+}
+
+function shouldOptimizeInput(editor: EditorComponent): boolean {
+	if (isAutocompleteOpen(editor)) return false;
+	const text = editor.getExpandedText?.() ?? editor.getText();
+	return Boolean(text.trim() && !shouldSkipInputRewrite(text));
 }
 
 export class EnglishEditorBridge implements EditorComponent, Focusable {
@@ -123,6 +137,10 @@ export class EnglishEditorBridge implements EditorComponent, Focusable {
 		this.base.setAutocompleteMaxVisible?.(maxVisible);
 	}
 
+	isShowingAutocomplete(): boolean {
+		return isAutocompleteOpen(this.base);
+	}
+
 	invalidate(): void {
 		this.base.invalidate();
 	}
@@ -137,12 +155,9 @@ export class EnglishEditorBridge implements EditorComponent, Focusable {
 			return;
 		}
 
-		if (matchesKey(data, Key.tab)) {
-			const text = this.getExpandedText();
-			if (text.trim() && !shouldSkipInputRewrite(text)) {
-				this.handlers.onOptimize(this);
-				return;
-			}
+		if (matchesKey(data, Key.tab) && shouldOptimizeInput(this)) {
+			this.handlers.onOptimize(this);
+			return;
 		}
 
 		this.base.handleInput(data);

@@ -26,6 +26,14 @@ interface GlobalState {
 	cleanup?: Cleanup;
 }
 
+type AutocompleteAwareEditor = EditorComponent & {
+	isShowingAutocomplete?: () => boolean;
+};
+
+function isAutocompleteOpen(editor: EditorComponent): boolean {
+	return (editor as AutocompleteAwareEditor).isShowingAutocomplete?.() === true;
+}
+
 function globalState(): GlobalState {
 	const root = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: GlobalState };
 	return (root[GLOBAL_STATE_KEY] ??= {});
@@ -132,6 +140,7 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 		const maybeOptimizeInput = (): boolean => {
 			if (isTranslationOverlayOpen()) return false;
 			const editor = getOptimizationEditor();
+			if (isAutocompleteOpen(editor)) return false;
 			const text = editor.getExpandedText?.() ?? editor.getText();
 			if (!text.trim() || shouldSkipInputRewrite(text)) return false;
 			void optimizeCurrentInput(ctx, editor);
