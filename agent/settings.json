@@ -1,33 +1,68 @@
 {
-  "defaultModel": "claude-fable-5",
-  "defaultProvider": "anthropic",
-  "defaultThinkingLevel": "xhigh",
-  "lastChangelogVersion": "0.80.3",
+  "defaultModel": "gpt-5.5",
+  "defaultProvider": "openai-codex",
+  "defaultThinkingLevel": "high",
+  "enabledModels": [
+    "anthropic/claude-opus-4-8",
+    "anthropic/claude-sonnet-5",
+    "anthropic/claude-fable-5",
+    "openai-codex/gpt-5.5",
+    "cursor/grok-4.5-fast-xhigh"
+  ],
+  "lastChangelogVersion": "0.80.6",
   "packages": [
     {
-      "source": "npm:pi-web-access",
-      "skills": []
+      "skills": [],
+      "source": "npm:pi-web-access"
     },
     "extensions/anthropic-subscription-prompt-cleaner",
     "npm:@guwidoe/pi-prompt-suggester",
-    "npm:@diegopetrucci/pi-openai-fast",
-    "/Users/jayseanqian/.vibe-island/pi-extension",
     "npm:@schultzp2020/pi-cursor",
     {
-      "source": "git:github.com/DietrichGebert/ponytail@6da37bfa7d0282522c7785759f4d2f1544015354",
+      "source": "npm:pi-codex-image-gen",
+      "extensions": [
+        "-index.ts"
+      ],
       "skills": [
-        "skills/ponytail"
+        "-skills/imagegen/SKILL.md"
       ]
     },
-    "npm:pi-codex-image-gen"
+    {
+      "extensions": [
+        "-dist/index.js"
+      ],
+      "source": "/Users/jayseanqian/.vibe-island/pi-extension"
+    },
+    {
+      "extensions": [
+        "-index.ts"
+      ],
+      "skills": [
+        "-skills/figma/SKILL.md"
+      ],
+      "source": "npm:pi-mono-figma"
+    },
+    "npm:@ff-labs/pi-fff",
+    {
+      "extensions": [
+        "-extensions/chrome-profile-bridge/index.ts"
+      ],
+      "source": "npm:pi-chrome"
+    },
+    "/Users/jayseanqian/.vibe-island/pi-extension"
   ],
   "quietStartup": true,
   "terminal": {
-    "showImages": true
+    "clearOnShrink": false,
+    "showImages": false,
+    "showTerminalProgress": true
   },
   "theme": "light/dark",
-  "treeFilterMode": "user-only",
+  "treeFilterMode": "default",
   "warnings": {
     "anthropicExtraUsage": false
-  }
+  },
+  "extensions": [
+    "-extensions/mermaid-ascii-view/index.ts"
+  ]
 }
