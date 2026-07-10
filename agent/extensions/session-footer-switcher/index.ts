@@ -1,13 +1,14 @@
 // Session switcher as a bottom-anchored, full-width overlay (mirrors the
 // ask-user-question style: horizontal-rule borders, no vertical │ side borders,
 // so wide CJK glyphs can never collide with a right-hand border).
-// The panel starts with a "New session" entry (equivalent to /new), followed
-// by the list of saved sessions.
+// The panel starts with a "New session" entry (equivalent to /new), then a
+// pinned-session section populated via /pin, followed by saved history sessions.
 // Toggle shortcut:
 //   Command+Shift+Left - requires terminal support for Super-modified keys
 // Manual fallback: /sessions
 
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
 import {
 	CustomEditor,
 	SessionManager,
@@ -33,6 +34,8 @@ import {
 } from "@earendil-works/pi-tui";
 
 const COMMAND_OPEN = "sessions";
+const COMMAND_PIN = "pin";
+const COMMAND_UNPIN = "unpin";
 const WIDGET_KEY = "session-footer-switcher";
 // Keep cached summaries generous; rendering still truncates to the live overlay width.
 const MAX_TITLE_WIDTH = 240;
@@ -42,6 +45,7 @@ const OVERLAY_VISIBLE_COUNT = 12;
 const INTERNAL_COMMAND_SWITCH_ARG = "--switch";
 const INTERNAL_COMMAND_PREFIX = `/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`;
 const DEBUG_KEYS_ARG = "debug-keys";
+const PIN_CUSTOM_TYPE = "session-footer-switcher/pin";
 
 const TOGGLE_KEY = Key.superShift("left");
 const TOGGLE_SEQUENCE_COMMAND_SHIFT_LEFT = "\x1b[991~";
@@ -68,12 +72,84 @@ interface SessionSummary {
 	detail: string;
 }
 
+interface SessionPin {
+	title: string;
+	pinnedAt?: string;
+}
+
+interface SessionDecorations {
+	summary: SessionSummary;
+	pin?: SessionPin;
+}
+
 interface SessionItem {
 	info: SessionInfo;
 	summary: SessionSummary;
+	pin?: SessionPin;
 }
 
-const summaryCache = new Map<string, { modifiedMs: number; summary: SessionSummary }>();
+const sessionItemCache = new Map<string, { modifiedMs: number } & SessionDecorations>();
+
+function parseSessionCreatedFromFilename(filePath: string, fallback: Date): Date {
+	const rawTimestamp = basename(filePath).split("_")[0];
+	const normalized = rawTimestamp?.replace(
+		/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/,
+		"$1T$2:$3:$4.$5Z",
+	);
+	const parsed = normalized ? new Date(normalized) : fallback;
+	return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function parseSessionIdFromFilename(filePath: string): string {
+	return basename(filePath).replace(/^[^_]+_/, "").replace(/\.jsonl$/, "") || filePath;
+}
+
+function placeholderSessionTitle(created: Date): string {
+	return `Session ${created.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z")}`;
+}
+
+async function listSessionsFast(cwd: string, sessionDir: string | undefined): Promise<SessionInfo[]> {
+	if (!sessionDir) return SessionManager.list(cwd, sessionDir);
+
+	// If the user points multiple projects at a shared custom sessionDir, Pi's
+	// canonical list() filters by the header cwd. The fast path intentionally
+	// avoids opening files, so only use it for the normal per-cwd session folder.
+	const expectedDefaultDirName = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	if (basename(sessionDir) !== expectedDefaultDirName) return SessionManager.list(cwd, sessionDir);
+
+	try {
+		const files = (await readdir(sessionDir))
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(sessionDir, file));
+		const sessions = (
+			await Promise.all(
+				files.map(async (filePath): Promise<SessionInfo | undefined> => {
+					try {
+						const stats = await stat(filePath);
+						const created = parseSessionCreatedFromFilename(filePath, stats.birthtime);
+						const placeholder = placeholderSessionTitle(created);
+						return {
+							path: filePath,
+							id: parseSessionIdFromFilename(filePath),
+							cwd,
+							created,
+							modified: stats.mtime,
+							messageCount: 0,
+							firstMessage: placeholder,
+							allMessagesText: "",
+						};
+					} catch {
+						return undefined;
+					}
+				}),
+			)
+		).filter((session): session is SessionInfo => Boolean(session));
+		return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	} catch {
+		// Fall back to Pi's canonical parser if the fast directory scan fails.
+		return SessionManager.list(cwd, sessionDir);
+	}
+}
 
 function cleanSingleLine(text: string | undefined, fallback: string): string {
 	const cleaned = (text ?? "")
@@ -118,13 +194,85 @@ function isMeaningfulUserText(text: string): boolean {
 	const cleaned = normaliseMessageText(text);
 	if (!cleaned) return false;
 	if (cleaned.startsWith(INTERNAL_COMMAND_PREFIX)) return false;
-	if (/^\/?(resume|reload|quit|new|session|tree|fork|clone)(\s|$)/i.test(cleaned)) return false;
+	if (/^\/?(resume|reload|quit|new|session|sessions|pin|unpin|tree|fork|clone)(\s|$)/i.test(cleaned)) return false;
 	if (/^(hi|hello|hey|thanks|thank you|你好|嗨|谢谢|好的|可以|ok|嗯|是的|继续)$/i.test(cleaned)) return false;
 	return cleaned.length >= 8;
 }
 
 function compactText(text: string, maxWidth: number): string {
 	return truncateToWidth(cleanSingleLine(normaliseMessageText(text), "No summary"), maxWidth, "...");
+}
+
+function normalizePinTitle(input: string): string {
+	return cleanSingleLine(normaliseMessageText(input.replace(/^#+/, "")), "").slice(0, 80);
+}
+
+function parsePinEntry(data: unknown, timestamp?: string): SessionPin | null | undefined {
+	if (typeof data === "string") {
+		const title = normalizePinTitle(data);
+		return title ? { title, pinnedAt: timestamp } : undefined;
+	}
+
+	if (!data || typeof data !== "object") return undefined;
+	const record = data as { title?: unknown; tag?: unknown; pinned?: unknown };
+	if (record.pinned === false) return null;
+
+	// Backward compatible with the earlier /pin <tag> shape.
+	const rawTitle = typeof record.title === "string" ? record.title : typeof record.tag === "string" ? record.tag : "";
+	const title = normalizePinTitle(rawTitle);
+	return title ? { title, pinnedAt: timestamp } : undefined;
+}
+
+function parseTabTitleEntry(data: unknown): string | null | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const state = data as { kind?: unknown; title?: unknown };
+	if (state.kind === "manual-reset") return null;
+	if ((state.kind === "manual" || state.kind === "llm" || state.kind === "llm-started") && typeof state.title === "string") {
+		const title = normalizePinTitle(state.title);
+		return title || undefined;
+	}
+	return undefined;
+}
+
+function derivePinTitleFromEntries(entries: unknown[], sessionName: string | undefined, fallback: string): string {
+	let tabTitle: string | undefined;
+	let latestRecap: string | undefined;
+	let firstUser: string | undefined;
+	let latestUser: string | undefined;
+
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const record = entry as {
+			type?: string;
+			customType?: string;
+			data?: unknown;
+			details?: { recap?: string };
+			message?: { role?: string; content?: unknown };
+		};
+
+		if (record.type === "custom" && record.customType === "kaku-tab-title") {
+			const nextTitle = parseTabTitleEntry(record.data);
+			if (nextTitle === null) {
+				tabTitle = undefined;
+			} else if (nextTitle) {
+				tabTitle = nextTitle;
+			}
+			continue;
+		}
+
+		if (record.type === "custom_message" && record.customType === "session-recap/line" && record.details?.recap) {
+			latestRecap = normalizePinTitle(record.details.recap);
+			continue;
+		}
+
+		if (record.type !== "message" || record.message?.role !== "user") continue;
+		const text = normaliseMessageText(extractTextContent(record.message.content));
+		if (!isMeaningfulUserText(text)) continue;
+		firstUser ??= text;
+		latestUser = text;
+	}
+
+	return normalizePinTitle(tabTitle || sessionName || latestRecap || latestUser || firstUser || fallback) || "Pinned session";
 }
 
 function inferSessionSummaryFromInfo(session: SessionInfo): SessionSummary {
@@ -158,12 +306,13 @@ function extractTextContent(content: unknown): string {
 		.join(" ");
 }
 
-async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
+async function readSessionDecorations(session: SessionInfo): Promise<SessionDecorations> {
 	try {
 		const content = await readFile(session.path, "utf8");
 		const userMessages: string[] = [];
 		const assistantMessages: string[] = [];
 		const recapMessages: string[] = [];
+		let pin: SessionPin | undefined;
 
 		for (const line of content.split("\n")) {
 			if (!line.trim()) continue;
@@ -180,8 +329,19 @@ async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
 			const custom = entry as {
 				type?: string;
 				customType?: string;
+				data?: unknown;
 				details?: { recap?: string };
+				timestamp?: string;
 			};
+			if (custom.type === "custom" && custom.customType === PIN_CUSTOM_TYPE) {
+				const nextPin = parsePinEntry(custom.data, custom.timestamp);
+				if (nextPin === null) {
+					pin = undefined;
+				} else if (nextPin) {
+					pin = nextPin;
+				}
+				continue;
+			}
 			if (
 				custom.type === "custom_message" &&
 				custom.customType === "session-recap/line" &&
@@ -215,22 +375,53 @@ async function summariseSession(session: SessionInfo): Promise<SessionSummary> {
 			.filter(Boolean)
 			.slice(-2) as string[];
 		const detail = compactText(detailParts.join(" → ") || titleSource, MAX_DETAIL_WIDTH);
-		return { title, detail };
+		return { summary: { title, detail }, pin };
 	} catch {
-		return inferSessionSummaryFromInfo(session);
+		return { summary: inferSessionSummaryFromInfo(session) };
 	}
 }
 
 async function buildSessionItem(session: SessionInfo): Promise<SessionItem> {
 	const modifiedMs = session.modified.getTime();
-	const cached = summaryCache.get(session.path);
+	const cached = sessionItemCache.get(session.path);
 	if (cached && cached.modifiedMs === modifiedMs) {
-		return { info: session, summary: cached.summary };
+		return { info: session, summary: cached.summary, pin: cached.pin };
 	}
 
-	const summary = await summariseSession(session);
-	summaryCache.set(session.path, { modifiedMs, summary });
-	return { info: session, summary };
+	const decorations = await readSessionDecorations(session);
+	sessionItemCache.set(session.path, { modifiedMs, ...decorations });
+	return { info: session, ...decorations };
+}
+
+function buildSessionItemFromCache(session: SessionInfo): SessionItem {
+	const modifiedMs = session.modified.getTime();
+	const cached = sessionItemCache.get(session.path);
+	if (cached && cached.modifiedMs === modifiedMs) {
+		return { info: session, summary: cached.summary, pin: cached.pin };
+	}
+	return { info: session, summary: inferSessionSummaryFromInfo(session) };
+}
+
+async function buildSessionItemsWithConcurrency(
+	sessions: SessionInfo[],
+	onItem?: (item: SessionItem) => void,
+): Promise<SessionItem[]> {
+	const results = new Array<SessionItem | undefined>(sessions.length);
+	let nextIndex = 0;
+	const workerCount = Math.min(4, sessions.length);
+	await Promise.all(
+		Array.from({ length: workerCount }, async () => {
+			while (nextIndex < sessions.length) {
+				const index = nextIndex++;
+				const session = sessions[index];
+				if (!session) continue;
+				const item = await buildSessionItem(session);
+				results[index] = item;
+				onItem?.(item);
+			}
+		}),
+	);
+	return results.filter((item): item is SessionItem => Boolean(item));
 }
 
 function asciiDisplayText(text: string): string {
@@ -255,6 +446,7 @@ function isFocusableComponent(component: Component): component is Component & Fo
 // ---------------------------------------------------------------------------
 
 class SessionSwitcherOverlay implements Component, Focusable {
+	private pinnedSessions: SessionItem[] = [];
 	private sessions: SessionItem[] = [];
 	private selectedIndex = 0;
 	private scrollOffset = 0;
@@ -305,31 +497,68 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		this.tui.requestRender();
 
 		try {
-			const sessions = await SessionManager.list(this.ctx.cwd, this.ctx.sessionManager.getSessionDir());
+			const sessions = await listSessionsFast(this.ctx.cwd, this.ctx.sessionManager.getSessionDir());
 			const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-			const items = await Promise.all(sorted.map((session) => buildSessionItem(session)));
 			if (seq !== this.loadSeq) return;
 
-			this.sessions = items;
-			this.scrollOffset = 0;
-			if (this.sessions.length === 0) {
-				// Only the "New session" entry remains selectable.
-				this.selectedIndex = 0;
-			} else {
-				// Index 0 is the "New session" entry; sessions occupy 1..N.
-				const currentIdx = this.sessions.findIndex((s) => s.info.path === this.currentPath());
-				this.selectedIndex = currentIdx >= 0 ? currentIdx + 1 : 0;
-				this.ensureSelectedVisible();
-			}
+			// Fast path: show the overlay after a cheap directory scan (stat only). Titles
+			// and pins use the in-memory cache when available; uncached files are hydrated
+			// below in the background so opening the switcher no longer blocks on reading
+			// every historical JSONL file.
+			this.applyItems(sorted.map((session) => buildSessionItemFromCache(session)), false);
+			this.loading = false;
+			this.tui.requestRender();
+
+			void this.hydrateSessions(seq, sorted);
 		} catch (error) {
 			if (seq !== this.loadSeq) return;
 			this.error = error instanceof Error ? error.message : String(error);
-		} finally {
-			if (seq === this.loadSeq) {
-				this.loading = false;
-				this.tui.requestRender();
-			}
+			this.loading = false;
+			this.tui.requestRender();
 		}
+	}
+
+	private applyItems(items: SessionItem[], preserveSelection: boolean): void {
+		const previousSelectedPath = preserveSelection ? this.selectedSession()?.info.path : undefined;
+		const keepNewSelected = preserveSelection && this.selectedIndex === 0;
+
+		this.pinnedSessions = items.filter((item) => item.pin);
+		this.sessions = items.filter((item) => !item.pin);
+
+		if (keepNewSelected || items.length === 0) {
+			this.selectedIndex = 0;
+			this.scrollOffset = 0;
+			return;
+		}
+
+		const targetPath = previousSelectedPath || this.currentPath();
+		const pinnedIdx = this.pinnedSessions.findIndex((s) => s.info.path === targetPath);
+		const historyIdx = this.sessions.findIndex((s) => s.info.path === targetPath);
+		this.selectedIndex =
+			pinnedIdx >= 0 ? pinnedIdx + 1 : historyIdx >= 0 ? historyIdx + this.pinnedSessions.length + 1 : 0;
+		this.ensureSelectedVisible();
+	}
+
+	private upsertHydratedItem(item: SessionItem): void {
+		const itemsByPath = new Map<string, SessionItem>();
+		for (const existing of [...this.pinnedSessions, ...this.sessions]) {
+			itemsByPath.set(existing.info.path, existing);
+		}
+		itemsByPath.set(item.info.path, item);
+		const items = Array.from(itemsByPath.values()).sort((a, b) => b.info.modified.getTime() - a.info.modified.getTime());
+		this.applyItems(items, true);
+	}
+
+	private async hydrateSessions(seq: number, sessions: SessionInfo[]): Promise<void> {
+		const items = await buildSessionItemsWithConcurrency(sessions, (item) => {
+			if (seq !== this.loadSeq) return;
+			this.upsertHydratedItem(item);
+			this.tui.requestRender();
+		});
+		if (seq !== this.loadSeq) return;
+		this.applyItems(items, true);
+		this.loading = false;
+		this.tui.requestRender();
 	}
 
 	handleInput(data: string): void {
@@ -375,21 +604,32 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		// position, e.g. "Sessions (3 of 26)" or "Sessions (new session)". Keeping
 		// title + counter on one row avoids the old two-line layout that looked
 		// misaligned at the top of the overlay.
-		const sessionCount = this.sessions.length;
-		const position =
-			this.selectedIndex === 0 ? "new session" : `${this.selectedIndex} of ${sessionCount}`;
+		const sessionCount = this.pinnedSessions.length + this.sessions.length;
+		const position = this.selectedIndex === 0 ? "new session" : `${this.selectedIndex} of ${sessionCount}`;
 		lines.push(pad(`${th.fg("accent", th.bold("Sessions"))} ${th.fg("dim", `(${position})`)}`));
 
 		// "New session" entry — rendered as a bordered button (equivalent to /new).
 		lines.push(...this.renderNewSessionRow(w));
-		// Divider separating the button from the saved-session list below.
+		// Divider separating the button from pinned/history sections below.
 		lines.push(rule());
 
+		if (this.pinnedSessions.length > 0) {
+			lines.push(pad(th.fg("accent", th.bold("Pinned Sessions"))));
+			for (let i = 0; i < this.pinnedSessions.length; i++) {
+				lines.push(this.renderPinnedSessionItem(this.pinnedSessions[i]!, i, w));
+			}
+			lines.push(rule());
+		}
+
+		lines.push(pad(th.fg("accent", th.bold("History Sessions"))));
+
 		// Session list area.
-		if (this.loading && this.sessions.length === 0) {
+		if (this.loading && sessionCount === 0) {
 			lines.push(pad(th.fg("dim", "loading sessions...")));
-		} else if (this.sessions.length === 0) {
+		} else if (sessionCount === 0) {
 			lines.push(pad(th.fg("dim", "no saved sessions")));
+		} else if (this.sessions.length === 0) {
+			lines.push(pad(th.fg("dim", "no unpinned history sessions")));
 		} else {
 			const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
 			const maxScroll = Math.max(0, this.sessions.length - visibleCount);
@@ -418,7 +658,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	}
 
 	private sessionNumberWidth(): number {
-		return Math.max(2, `${this.sessions.length}.`.length);
+		return Math.max(2, `${this.pinnedSessions.length + this.sessions.length}.`.length);
 	}
 
 	// Render the "New session" entry as a compact single-line bracket button so it
@@ -453,13 +693,35 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		return [isSelected ? withSelectedBackground(th, row, width) : row];
 	}
 
-	private renderSessionItem(item: SessionItem, index: number, width: number): string {
+	private renderPinnedSessionItem(item: SessionItem, index: number, width: number): string {
 		const th = this.theme;
-		// Sessions occupy unified indices 1..N (index 0 is the "New session" entry).
-		const isSelected = index === this.selectedIndex - 1;
+		const isSelected = this.selectedIndex === index + 1;
 		const isCurrent = item.info.path === this.currentPath();
 		const cursorChar = isSelected ? "›" : " ";
 		const number = `${index + 1}.`.padStart(this.sessionNumberWidth(), " ");
+		const pinTitle = item.pin?.title || item.summary.title;
+		const prefixPlain = ` ${cursorChar} ${number} `;
+		const titleWidth = Math.max(1, width - visibleWidth(prefixPlain));
+		const titleText = truncateToWidth(asciiDisplayText(pinTitle), titleWidth, "...");
+		const body = `${number} ${titleText}`;
+		const cursor = isSelected ? th.fg("accent", "›") : " ";
+		const styled = isSelected
+			? th.bold(th.fg("accent", body))
+			: isCurrent
+				? th.fg("success", body)
+				: th.fg("text", body);
+		const line = ` ${cursor} ${styled}`;
+		return isSelected ? withSelectedBackground(th, line, width) : line;
+	}
+
+	private renderSessionItem(item: SessionItem, index: number, width: number): string {
+		const th = this.theme;
+		// Sessions occupy unified indices 1..N (index 0 is the "New session" entry).
+		const unifiedIndex = this.pinnedSessions.length + index + 1;
+		const isSelected = this.selectedIndex === unifiedIndex;
+		const isCurrent = item.info.path === this.currentPath();
+		const cursorChar = isSelected ? "›" : " ";
+		const number = `${unifiedIndex}.`.padStart(this.sessionNumberWidth(), " ");
 		// Plain prefix drives the width math; color is applied afterwards.
 		const prefixPlain = ` ${cursorChar} ${number} `;
 		const titleWidth = Math.max(1, width - visibleWidth(prefixPlain));
@@ -483,12 +745,14 @@ class SessionSwitcherOverlay implements Component, Focusable {
 
 	private selectedSession(): SessionItem | undefined {
 		if (this.selectedIndex === 0) return undefined;
-		return this.sessions[this.selectedIndex - 1];
+		const pinnedIdx = this.selectedIndex - 1;
+		if (pinnedIdx < this.pinnedSessions.length) return this.pinnedSessions[pinnedIdx];
+		return this.sessions[this.selectedIndex - this.pinnedSessions.length - 1];
 	}
 
 	private move(delta: number): void {
 		// Total selectable rows: the "New session" entry plus every saved session.
-		const total = this.sessions.length + 1;
+		const total = this.pinnedSessions.length + this.sessions.length + 1;
 		this.notice = undefined;
 		this.selectedIndex = (this.selectedIndex + delta + total) % total;
 		this.ensureSelectedVisible();
@@ -496,8 +760,8 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	}
 
 	private ensureSelectedVisible(): void {
-		if (this.selectedIndex <= 0) return; // "New session" entry — no session scrolling needed.
-		const sessionIdx = this.selectedIndex - 1;
+		if (this.selectedIndex <= this.pinnedSessions.length) return; // New/pinned rows need no history scrolling.
+		const sessionIdx = this.selectedIndex - this.pinnedSessions.length - 1;
 		const visibleCount = Math.min(this.sessions.length, OVERLAY_VISIBLE_COUNT);
 		const maxScroll = Math.max(0, this.sessions.length - visibleCount);
 
@@ -741,6 +1005,34 @@ export default function (pi: ExtensionAPI) {
 	let pendingSwitchPath: string | undefined;
 	let debugKeysUntil = 0;
 	const state = globalState();
+
+	pi.registerCommand(COMMAND_PIN, {
+		description: "Pin the current session using its current session title",
+		handler: async (_args, ctx) => {
+			const title = derivePinTitleFromEntries(
+				ctx.sessionManager.getBranch() as unknown[],
+				ctx.sessionManager.getSessionName(),
+				ctx.sessionManager.getHeader()?.cwd || ctx.cwd,
+			);
+
+			pi.appendEntry(PIN_CUSTOM_TYPE, { pinned: true, title, updatedAt: new Date().toISOString() });
+			const sessionPath = ctx.sessionManager.getSessionFile();
+			if (sessionPath) sessionItemCache.delete(sessionPath);
+			ctx.ui.notify(`Pinned current session: ${title}`, "info");
+			pi.events.emit("session-switcher:pins-changed", undefined);
+		},
+	});
+
+	pi.registerCommand(COMMAND_UNPIN, {
+		description: "Remove the pin from the current session",
+		handler: async (_args, ctx) => {
+			pi.appendEntry(PIN_CUSTOM_TYPE, { pinned: false, updatedAt: new Date().toISOString() });
+			const sessionPath = ctx.sessionManager.getSessionFile();
+			if (sessionPath) sessionItemCache.delete(sessionPath);
+			ctx.ui.notify("Unpinned current session", "info");
+			pi.events.emit("session-switcher:pins-changed", undefined);
+		},
+	});
 
 	// Manual command to open the overlay. The --switch form is private to the overlay.
 	pi.registerCommand(COMMAND_OPEN, {
