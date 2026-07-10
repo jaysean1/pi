@@ -10,7 +10,6 @@ import type {
 const BASE_MESSAGE = "Working...";
 const REFRESH_MS = 1000;
 const SUMMARY_TYPE = "working-timer/run-duration";
-const STATUS_KEY = "working-timer";
 const SUMMARY_WRITE_DELAY_MS = 0;
 const SUMMARY_RETRY_MS = 50;
 
@@ -76,18 +75,10 @@ export default function (pi: ExtensionAPI): void {
 		return `${BASE_MESSAGE} (${getElapsedLabel(now)})`;
 	}
 
-	function renderStatusMessage(now = Date.now()): string {
-		return `✻ Working for ${getElapsedLabel(now)}`;
-	}
-
 	function updateWorkingMessage(): void {
 		if (!state.activeCtx || state.startedAtMs === undefined) return;
 		const now = Date.now();
 		state.activeCtx.ui.setWorkingMessage(renderWorkingMessage(now));
-		// `setWorkingMessage()` only affects Pi's transient streaming loader. Mirror
-		// the timer into the extension status surface as well, so it remains visible
-		// with custom footers/statuslines and in layouts where the loader is hidden.
-		state.activeCtx.ui.setStatus(STATUS_KEY, renderStatusMessage(now));
 	}
 
 	function cancelPendingSummary(): void {
@@ -156,7 +147,6 @@ export default function (pi: ExtensionAPI): void {
 		state.startedAtMs = undefined;
 		state.activeCtx = undefined;
 		ctxToReset?.ui.setWorkingMessage();
-		ctxToReset?.ui.setStatus(STATUS_KEY, undefined);
 	}
 
 	pi.registerMessageRenderer<RunDurationDetails>(

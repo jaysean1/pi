@@ -191,8 +191,10 @@ const DEFAULTS: RecapConfig = {
 
 const SYSTEM_PROMPT = [
 	"You write a single-line recap of a coding-agent session, in the style of Claude Code's session recap.",
-	"Output exactly ONE concise line: what this session accomplished, plus the immediate next step if there is one.",
-	"Do NOT start with 'The user asked', 'This session', 'In this conversation', or similar preambles.",
+	"Capture two things in order: (1) what the USER asked for, then (2) what the ASSISTANT actually did about it.",
+	"Use a compact request→action shape, e.g. '用户要 X；已完成 Y' or 'Asked to X — did Y'. Add the immediate next step only if one clearly remains.",
+	"Stay on ONE line and be terse: prefer concrete verbs and nouns over filler; drop articles/pronouns when they add no meaning.",
+	"Do NOT open with narration like 'This session', 'In this conversation', or 'The user asked to' as a full sentence — lead straight with the request itself.",
 	"No markdown, no bullets, no quotes, no trailing period needed. Be specific and concrete.",
 	"Write in the SAME language the conversation uses (e.g. reply in Chinese if the conversation is in Chinese).",
 ].join("\n");
@@ -415,7 +417,7 @@ export default function (pi: ExtensionAPI): void {
 					messages: [
 						{
 							role: "user",
-							content: `${langLine}\n\nSummarize this session in one line (≤ ${cfg.maxChars} chars):\n\n${conversation}`,
+							content: `${langLine}\n\nRecap this session in one line (≤ ${cfg.maxChars} chars): first what the user requested, then what was done about it.\n\n${conversation}`,
 							timestamp: Date.now(),
 						},
 					],

@@ -1,8 +1,9 @@
 // Mermaid ASCII overlay extension for Pi Agent.
 // Not for changing assistant messages or session context.
 
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -86,6 +87,12 @@ interface RenderedDiagram {
 	output: string;
 	command: string;
 	error?: string;
+}
+
+interface RenderCandidate {
+	label: string;
+	command: string;
+	baseArgs: string[];
 }
 
 interface ActiveOverlay {
@@ -191,7 +198,8 @@ async function openOrToggleMermaid(pi: ExtensionAPI, ctx: ExtensionContext): Pro
 		await ctx.ui.custom<"closed">(
 			async (tui, theme, _keybindings, done) => {
 				const terminalColumns = Number.isFinite(tui.terminal.columns) ? tui.terminal.columns : 100;
-				const renderWidth = Math.max(40, Math.min(160, terminalColumns - 6));
+				// Match card inner width: cardLine uses width - 4 for content.
+				const renderWidth = cardInnerWidth(terminalColumns);
 				const diagrams = await renderBlocks(pi, ctx, blocks, renderWidth);
 				const overlay = new MermaidAsciiOverlay(tui, theme, diagrams, () => done("closed"));
 				activeOverlay = overlay;
@@ -280,6 +288,38 @@ async function renderBlocks(
 	}
 }
 
+function resolveTermaidCandidates(): RenderCandidate[] {
+	const home = homedir();
+	const localBin = join(home, ".local", "bin");
+	const uvToolBin = join(home, ".local", "share", "uv", "tools", "termaid", "bin", "termaid");
+	const seen = new Set<string>();
+	const candidates: RenderCandidate[] = [];
+
+	const add = (label: string, command: string, baseArgs: string[] = []) => {
+		const key = `${command}\0${baseArgs.join("\0")}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		candidates.push({ label, command, baseArgs });
+	};
+
+	// Prefer absolute paths first: Pi is often launched with a minimal PATH.
+	if (existsSync(uvToolBin)) add("uv tool termaid", uvToolBin);
+	const localTermaid = join(localBin, "termaid");
+	if (existsSync(localTermaid)) add("~/.local/bin/termaid", localTermaid);
+	add("termaid", "termaid");
+
+	const uvxLocal = join(localBin, "uvx");
+	add("uvx termaid", existsSync(uvxLocal) ? uvxLocal : "uvx", [
+		"--cache-dir",
+		join(tmpdir(), "uv-cache"),
+		"--from",
+		"termaid",
+		"termaid",
+	]);
+
+	return candidates;
+}
+
 async function renderOne(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -287,31 +327,28 @@ async function renderOne(
 	file: string,
 	width: number,
 ): Promise<RenderedDiagram> {
-	const primary = await tryRender(pi, ctx, "termaid", ["--ascii", "--width", String(width), file]);
-	if (primary.ok) {
-		return { ...block, output: primary.output, command: "termaid" };
-	}
+	const candidates = resolveTermaidCandidates();
+	const errors: string[] = [];
 
-	const fallback = await tryRender(pi, ctx, "uvx", [
-		"--cache-dir",
-		"/tmp/uv-cache",
-		"--from",
-		"termaid",
-		"termaid",
-		"--ascii",
-		"--width",
-		String(width),
-		file,
-	]);
-	if (fallback.ok) {
-		return { ...block, output: fallback.output, command: "uvx termaid" };
+	for (const candidate of candidates) {
+		const result = await tryRender(pi, ctx, candidate.command, [
+			...candidate.baseArgs,
+			"--ascii",
+			"--width",
+			String(width),
+			file,
+		]);
+		if (result.ok) {
+			return { ...block, output: result.output, command: candidate.label };
+		}
+		errors.push(`${candidate.label} failed:\n${result.error}`);
 	}
 
 	return {
 		...block,
 		output: "",
-		command: "termaid",
-		error: `termaid failed:\n${primary.error}\n\nuvx fallback failed:\n${fallback.error}`,
+		command: candidates[0]?.label ?? "termaid",
+		error: `${errors.join("\n\n")}\n\nInstall with: uv tool install termaid`,
 	};
 }
 
@@ -323,10 +360,17 @@ async function tryRender(
 ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
 	const result = await pi.exec(command, args, { cwd: ctx.cwd, timeout: RENDER_TIMEOUT_MS });
 	const output = result.stdout.trimEnd();
+	const stderr = result.stderr.trim();
 	if (result.code === 0 && output.trim()) return { ok: true, output };
+
+	const spawnFailure = /\bENOENT\b/i.test(stderr) || /spawn .+ ENOENT/i.test(stderr);
+	const likelyMissing = spawnFailure || ((result.code === 1 || result.code === null) && !output.trim() && !stderr);
 	const details = [
-		`${command} exited ${result.code}${result.killed ? " (killed)" : ""}`,
-		result.stderr.trim(),
+		`${command} exited ${result.code ?? "unknown"}${result.killed ? " (killed)" : ""}`,
+		likelyMissing
+			? "command not found (Pi may have a minimal PATH; try: uv tool install termaid)"
+			: "",
+		stderr,
 		!output.trim() ? "stdout was empty" : "",
 	]
 		.filter(Boolean)
@@ -472,13 +516,13 @@ class MermaidAsciiOverlay implements Component, ActiveOverlay {
 		const tone = diagram.error ? "error" : toneForDiagram(diagram.index);
 		const innerWidth = Math.max(1, width - 4);
 		lines.push(cardRule(this.theme, tone, width, "╭", "╮"));
-		lines.push(cardLine(this.theme, tone, this.theme.bold(title), width, true));
+		lines.push(cardLine(this.theme, tone, this.theme.bold(title), width, true, true));
 		lines.push(cardRule(this.theme, tone, width, "├", "┤"));
 		const body = diagram.error ? `Rendering failed:\n${diagram.error}\n\nSource:\n${diagram.source}` : diagram.output;
 		const bodyLines = body.split("\n");
-		const displayLines = diagram.error ? bodyLines : centreBlockLines(bodyLines, innerWidth);
+		const displayLines = diagram.error ? bodyLines : fitBlockLines(bodyLines, innerWidth);
 		for (const raw of displayLines) {
-			lines.push(cardLine(this.theme, tone, raw, width));
+			lines.push(cardLine(this.theme, tone, raw, width, false, !diagram.error));
 		}
 		lines.push(cardRule(this.theme, tone, width, "╰", "╯"));
 	}
@@ -495,14 +539,27 @@ function cardRule(theme: Theme, tone: DiagramTone, width: number, left: string, 
 	return `${bg}${border}${left}${"─".repeat(Math.max(0, width - 2))}${right}${RESET_FG}${RESET_BG}`;
 }
 
-function cardLine(theme: Theme, tone: DiagramTone, text: string, width: number, title = false): string {
+function cardInnerWidth(width: number): number {
+	return Math.max(40, width - 4);
+}
+
+function cardLine(
+	theme: Theme,
+	tone: DiagramTone,
+	text: string,
+	width: number,
+	title = false,
+	ellipsis = true,
+): string {
 	const palette = DIAGRAM_PALETTES[tone];
 	const innerWidth = Math.max(0, width - 4);
-	const content = truncateToWidth(text, innerWidth, "…", true);
+	const content = truncateToWidth(text, innerWidth, ellipsis ? "…" : "", true);
+	const pad = Math.max(0, innerWidth - visibleWidth(content));
+	const padded = `${content}${" ".repeat(pad)}`;
 	const bg = ansiBg(theme, resolve(theme, palette.bg));
 	const border = ansiFg(theme, resolve(theme, palette.border));
 	const fg = ansiFg(theme, resolve(theme, title ? palette.title : palette.fg));
-	return `${bg}${border}│${RESET_FG} ${fg}${content}${RESET_FG} ${border}│${RESET_FG}${RESET_BG}`;
+	return `${bg}${border}│${RESET_FG} ${fg}${padded}${RESET_FG} ${border}│${RESET_FG}${RESET_BG}`;
 }
 
 function resolve(theme: Theme, color: DualColor): ColorPair {
@@ -573,6 +630,13 @@ function isToggleKey(data: string): boolean {
 
 function isToggleKeyPress(data: string): boolean {
 	return isToggleKey(data) && !isKeyRelease(data) && !isKeyRepeat(data);
+}
+
+function fitBlockLines(lines: string[], width: number): string[] {
+	const maxWidth = Math.max(0, ...lines.map((line) => visibleWidth(line)));
+	if (maxWidth <= width) return centreBlockLines(lines, width);
+	// Clip wide ASCII art from the left edge; ellipsis breaks box-drawing chars.
+	return lines.map((line) => truncateToWidth(line, width, "", true));
 }
 
 function centreBlockLines(lines: string[], width: number): string[] {
