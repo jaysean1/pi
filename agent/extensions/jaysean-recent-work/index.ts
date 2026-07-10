@@ -1,4 +1,4 @@
-// jaysean recent work: standalone recent-session section for the intro header.
+// jaysean recent history: standalone recent-session section for the intro header.
 // Reuses session-recap custom messages, generates missing summaries with a cheap LLM,
 // and falls back to a bounded heuristic summary when no cached/LLM summary is available.
 
@@ -113,8 +113,6 @@ const SYSTEM_PROMPT = [
 	"No markdown, no bullets, no quotes, no trailing period.",
 	"Write in the same language the conversation uses unless instructed otherwise.",
 ].join("\n");
-
-const activeSections = new Set<RecentWorkSection>();
 
 function fgTrue(c: RGB): string {
 	return `\x1b[38;2;${c[0]};${c[1]};${c[2]}m`;
@@ -508,12 +506,7 @@ export class RecentWorkSection implements Component {
 		this.tui = tui;
 		this.theme = theme;
 		this.indent = options.indent ?? 2;
-		activeSections.add(this);
-		void this.load(false);
-	}
-
-	refresh(): void {
-		void this.load(true);
+		void this.load();
 	}
 
 	dispose(): void {
@@ -521,7 +514,6 @@ export class RecentWorkSection implements Component {
 		this.seq++;
 		for (const abort of this.aborts) abort.abort();
 		this.aborts.clear();
-		activeSections.delete(this);
 	}
 
 	invalidate(): void {
@@ -537,11 +529,10 @@ export class RecentWorkSection implements Component {
 		return emit(this.theme, c) + text + RESET;
 	}
 
-	private async load(force: boolean): Promise<void> {
+	private async load(): Promise<void> {
 		const cfg = getConfig(this.ctx);
 		const mySeq = ++this.seq;
 		this.loaded = false;
-		if (force) this.items = [];
 		this.tui.requestRender();
 
 		try {
@@ -605,18 +596,9 @@ export class RecentWorkSection implements Component {
 				const summary = await generateSummary(this.ctx, cfg, item.conversation, abort.signal);
 				if (!summary || this.disposed || seq !== this.seq) continue;
 
-				item.summary = summary;
-				item.source = "llm";
 				item.conversation = "";
-				// NOTE: intentionally no this.tui.requestRender() here.
-				// This section is rendered inside a ctx.ui.setHeader header, so it lives
-				// at the very top of the TUI buffer. LLM summary upgrades land seconds
-				// later, i.e. after the user has begun working and scrolled down. At that
-				// point prevViewportTop > 0, and any change in the header region satisfies
-				// `firstChanged < prevViewportTop` inside pi-tui, forcing a fullRender
-				// (clear scrollback + reprint from top + snap viewport to bottom).
-				// Update the item silently; the upgraded summary is picked up on the
-				// next natural render (e.g. the user's next keystroke).
+				// Keep the visible list stable for this session. Background LLM upgrades
+				// are cached only, then picked up on the next fresh session / Pi startup.
 
 				if (cfg.cache) {
 					void writeCacheEntry(item.path, {
@@ -663,7 +645,7 @@ export class RecentWorkSection implements Component {
 		out.push(truncateToWidth(pad + this.style(DIM_RGB, "recent"), width, this.style(DIM_RGB, OVERFLOW_MARKER)));
 
 		if (!this.loaded) {
-			out.push(truncateToWidth(pad + this.style(DIM_RGB, "  • loading recent work…"), width, this.style(DIM_RGB, OVERFLOW_MARKER)));
+			out.push(truncateToWidth(pad + this.style(DIM_RGB, "  • loading recent history..."), width, this.style(DIM_RGB, OVERFLOW_MARKER)));
 			return out;
 		}
 		if (this.items.length === 0) {
@@ -684,26 +666,7 @@ export function createRecentWorkSection(
 	return new RecentWorkSection(ctx, tui, theme, options);
 }
 
-export default function activate(pi: ExtensionAPI): void {
-	pi.registerCommand("recent", {
-		description: "Refresh the intro-header recent-work summaries",
-		getArgumentCompletions: (prefix: string) => {
-			const items = ["refresh", "status"].map((value) => ({ value, label: value }));
-			const filtered = items.filter((item) => item.value.startsWith(prefix));
-			return filtered.length > 0 ? filtered : null;
-		},
-		handler: async (args, ctx) => {
-			const arg = (args || "refresh").trim().toLowerCase();
-			if (arg === "status") {
-				const cfg = getConfig(ctx);
-				ctx.ui.notify(
-					`[recent] sections=${activeSections.size} model=${cfg.model} maxItems=${cfg.maxItems} llm=${cfg.generateMissing}`,
-					"info",
-				);
-				return;
-			}
-			for (const section of activeSections) section.refresh();
-			ctx.ui.notify(`[recent] refresh requested for ${activeSections.size} section(s)`, "info");
-		},
-	});
+export default function activate(_pi: ExtensionAPI): void {
+	// No runtime refresh command: Recent History loads only when the Intro header is
+	// installed during a fresh session / Pi startup.
 }

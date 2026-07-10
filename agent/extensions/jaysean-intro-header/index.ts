@@ -1,5 +1,5 @@
-// jaysean intro header: an animated 3D ASCII wordmark plus a recent-work summary, shown on startup.
-// The wordmark plays a rainbow reveal that freezes red; below it, recent session progress is listed.
+// jaysean intro header: an animated 3D ASCII wordmark plus a recent-history list.
+// The wordmark plays a rainbow reveal that freezes red.
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
@@ -16,18 +16,21 @@ const BANNER: string[] = [
 	"╚█████╔╝██║  ██║   ██║   ███████║███████╗██║  ██║██║ ╚████║",
 	" ╚════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝",
 ];
-const TAGLINE = "· your terminal AI agent ·";
-
 type RGB = [number, number, number];
 
 // --- Final frozen palette: red-dominant, anchored on the Claude "crab" coral (#d97757). ---
 const RED_START: RGB = [190, 26, 34]; // deep crab red    #be1a22
 const RED_END: RGB = [217, 119, 87]; // Claude burnt orange #d97757
 const HIGHLIGHT: RGB = [250, 250, 255]; // white sweep crest during reveal
-const SHADOW_MUL = 0.24; // how dark the 3D extrude is
-
-// --- Recent section palette (tuned for a light / cream background) ---
-const DIM_RGB: RGB = [105, 97, 92]; // tagline / fallback hints
+const SHADOW_MUL = 0.24; // light mode: how dark the 3D extrude is (multiply toward black)
+// Dark mode: multiplying toward black lands the shadow at the background luminance and it
+// disappears. Instead, lift the shadow up from an approximate dark-terminal background
+// toward the face colour so the 3D extrude stays readable on dark backgrounds.
+const SHADOW_DARK_BG: RGB = [24, 24, 28]; // approx. dark terminal background
+const SHADOW_DARK_MIX = 0.48; // how far the dark-mode shadow reaches toward the face colour
+const GHOST_MUL = 0.15; // light mode: unrevealed ghost brightness (multiply toward black)
+const GHOST_DARK_MIX = 0.3; // dark mode: unrevealed ghost lift from the background
+const DIM_RGB: RGB = [105, 97, 92];
 
 // --- Animated rainbow while the intro plays (ultrathink-style shimmer). ---
 const HUE_SPREAD = 320; // degrees of rainbow spread across the wordmark
@@ -48,8 +51,7 @@ const FRAME_MS = 40; // ~25fps while animating
 // snap to bottom). This caps how many entries still count as "short enough".
 const INTRO_MAX_ENTRIES = 8;
 
-// --- Recent-work section ---
-const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and recent section.
+const HEADER_INDENT = 2; // Claude Code-style left inset for the wordmark and recent history.
 const RECENT_LIST_INDENT_TRIM = HEADER_INDENT + 2; // remove old title/list nesting before bullets.
 const OVERFLOW_MARKER = "...";
 
@@ -98,8 +100,27 @@ function hslToRgb(h: number, s: number, l: number): RGB {
 	return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
-function truncWidth(s: string, max: number): string {
-	return truncateToWidth(s, max, OVERFLOW_MARKER);
+// The global theme can hot-swap at runtime (e.g. a mac-system-theme extension), so detect
+// dark mode per call and memoize on the resolved values rather than the Theme instance.
+let darkThemeCacheKey: string | undefined;
+let darkThemeCacheValue = true;
+function isDarkTheme(theme: Theme): boolean {
+	const textAnsi = theme.getFgAnsi("text");
+	const key = `${theme.name ?? ""}|${textAnsi}`;
+	if (key === darkThemeCacheKey) return darkThemeCacheValue;
+	let dark: boolean;
+	if (theme.name === "light") {
+		dark = false;
+	} else if (theme.name === "dark") {
+		dark = true;
+	} else {
+		// Custom theme: bright body text implies a dark terminal background.
+		const m = textAnsi.match(/\[38;2;(\d+);(\d+);(\d+)m/);
+		dark = m ? Number(m[1]) * 0.2126 + Number(m[2]) * 0.7152 + Number(m[3]) * 0.0722 >= 140 : true;
+	}
+	darkThemeCacheKey = key;
+	darkThemeCacheValue = dark;
+	return dark;
 }
 
 function stripAnsi(s: string): string {
@@ -240,7 +261,11 @@ class IntroHeader implements Component {
 		const s = lerp(ART.dMin - BAND, ART.dMax + BAND, prog);
 		const d = c - r * 1.2;
 		const rb = rainbow(c, r, elapsed);
-		if (s < d - BAND) return mul(rb, 0.15); // not revealed yet (faint ghost)
+		if (s < d - BAND) {
+			// Not revealed yet (faint ghost). On dark backgrounds, lift from the background
+			// instead of multiplying toward black, which would make the ghost invisible.
+			return isDarkTheme(this.theme) ? mix(SHADOW_DARK_BG, rb, GHOST_DARK_MIX) : mul(rb, GHOST_MUL);
+		}
 		if (s <= d + BAND) {
 			const k = 1 - Math.abs(s - d) / BAND;
 			return mix(rb, HIGHLIGHT, Math.max(0, k) * 0.9); // bright sweep crest
@@ -251,18 +276,13 @@ class IntroHeader implements Component {
 	private cellStyle(t: number, r: number, c: number, elapsed: number): { ansi: string; ch: string } {
 		const face = this.faceColor(r, c, elapsed);
 		const ch = ART.chars[r]![c]!;
-		return t === 1
-			? { ansi: this.emit(mul(face, SHADOW_MUL)), ch } // dim box-drawing 3D shadow
-			: { ansi: this.emit(face), ch }; // bright full-block face
-	}
-
-	/** Centered subtitle, aligned under the banner span. */
-	private taglineLine(width: number): string {
-		const padW = visibleWidth(this.leftPad(width, ART.w));
-		const span = Math.min(ART.w, Math.max(0, width - padW));
-		const text = truncWidth(TAGLINE, span);
-		const lead = padW + Math.max(0, Math.floor((span - visibleWidth(text)) / 2));
-		return " ".repeat(lead) + this.emit(DIM_RGB) + text + RESET;
+		if (t !== 1) return { ansi: this.emit(face), ch }; // bright full-block face
+		// Dim box-drawing 3D shadow. Light mode darkens the face colour toward black;
+		// dark mode lifts it up from the background so the extrude stays visible.
+		const shadow = isDarkTheme(this.theme)
+			? mix(SHADOW_DARK_BG, face, SHADOW_DARK_MIX)
+			: mul(face, SHADOW_MUL);
+		return { ansi: this.emit(shadow), ch };
 	}
 
 	private leftPad(width: number, reservedWidth = 1): string {
@@ -270,7 +290,7 @@ class IntroHeader implements Component {
 		return " ".repeat(Math.min(HEADER_INDENT, available));
 	}
 
-	/** Animated wordmark plus tagline, with no leading blank line. */
+	/** Animated wordmark, with no leading blank line. */
 	private bannerLines(width: number, elapsed: number): string[] {
 		const lines: string[] = [];
 		for (let r = 0; r < ART.h; r++) {
@@ -295,23 +315,11 @@ class IntroHeader implements Component {
 			if (last) outLine += RESET;
 			lines.push(this.leftPad(width, ART.w) + outLine);
 		}
-		lines.push(this.taglineLine(width));
 		return lines;
 	}
 
-	/** Lines for the delegated recent-work section. */
-	private recentLines(width: number): string[] {
-		if (this.recent) return this.recent.render(width);
-		const pad = this.leftPad(width);
-		return [
-			"",
-			truncateToWidth(pad + this.emit(DIM_RGB) + "recent" + RESET, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
-			truncateToWidth(
-				pad + this.emit(DIM_RGB) + "  • loading recent work…" + RESET,
-				width,
-				this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET,
-			),
-		];
+	private renderStacked(width: number, elapsed: number): string[] {
+		return ["", ...this.bannerLines(width, elapsed), "", ...this.recentListLines(width)];
 	}
 
 	/** Recent list only: drop the stacked-layout spacer, heading, and old nested indent. */
@@ -324,8 +332,19 @@ class IntroHeader implements Component {
 		);
 	}
 
-	private renderStacked(width: number, elapsed: number): string[] {
-		return ["", ...this.bannerLines(width, elapsed), "", ...this.recentListLines(width)];
+	/** Lines for the delegated recent-history section. */
+	private recentLines(width: number): string[] {
+		if (this.recent) return this.recent.render(width);
+		const pad = this.leftPad(width);
+		return [
+			"",
+			truncateToWidth(pad + this.emit(DIM_RGB) + "recent" + RESET, width, this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET),
+			truncateToWidth(
+				pad + this.emit(DIM_RGB) + "  • loading recent history..." + RESET,
+				width,
+				this.emit(DIM_RGB) + OVERFLOW_MARKER + RESET,
+			),
+		];
 	}
 
 	render(width: number): string[] {
@@ -346,20 +365,28 @@ let active: IntroHeader | undefined;
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		if (!ctx.hasUI) return;
-		// Animate only for a fresh, short view (startup/new with little history), where the
-		// header stays within the viewport (viewportTop === 0) so its per-frame repaints stay
-		// local. On reload/resume/fork the restored history scrolls the header off-screen, and
-		// each animation frame would force a full-screen redraw (flash from top + jump to bottom).
+		// Keep the custom header installed for fresh sessions and /reload.
+		//
+		// Animation frames in a header that has already scrolled above the viewport can
+		// make pi-tui perform a full render (clear scrollback, repaint from the top,
+		// then jump back to the bottom).
+		// Therefore only animate on genuinely fresh, short sessions. On /reload, keep
+		// JAYSEAN and Recent History visible, but render the wordmark already frozen.
 		let entryCount = 0;
 		try {
 			entryCount = ctx.sessionManager.getEntries().length;
 		} catch {
 			entryCount = 0;
 		}
-		const animate =
-			(event.reason === "startup" || event.reason === "new") && entryCount <= INTRO_MAX_ENTRIES;
+		const shouldInstallHeader = event.reason === "startup" || event.reason === "new" || event.reason === "reload";
+		const isFreshSession = event.reason === "startup" || event.reason === "new";
+		const shouldAnimate = isFreshSession && entryCount <= INTRO_MAX_ENTRIES;
+		if (!shouldInstallHeader) {
+			active = undefined;
+			return;
+		}
 		ctx.ui.setHeader((tui, theme) => {
-			active = new IntroHeader(tui, theme, ctx, animate);
+			active = new IntroHeader(tui, theme, ctx, shouldAnimate);
 			return active;
 		});
 	});

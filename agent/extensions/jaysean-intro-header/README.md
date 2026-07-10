@@ -14,21 +14,25 @@ one-shot intro in three phases:
 
 Truecolor terminals get 24-bit colour; 256-colour terminals get a cube fallback.
 
-Below the wordmark it delegates the **recent-work summary** to the sibling
-`jaysean-recent-work` extension. The `recent` heading and old nested list indent
-are hidden so only flush-left list items are shown. The section shows the last
-few sessions for this workspace with relative time (`now` / `34m` / `2h` /
-`2d`). The current session is excluded.
+The 3D shadow is theme-aware: on light themes it darkens the face colour toward
+black, while on dark themes it is lifted **up from the background** toward the
+face colour (`SHADOW_DARK_BG` / `SHADOW_DARK_MIX`) so the extrude stays visible
+instead of sinking into a dark terminal background. The unrevealed "ghost"
+cells during the sweep use the same dark-mode lift (`GHOST_DARK_MIX`). Dark
+mode is detected from the theme name (or body-text luminance for custom
+themes) and re-checked on theme hot-swaps.
 
-`jaysean-recent-work` is responsible for scanning sessions, reusing
-`session-recap/line` summaries, background LLM summarisation, and heuristic
-fallbacks. This keeps the header focused on rendering the intro shell.
+Below the wordmark it delegates the **Recent History** list to the sibling
+`jaysean-recent-work` component. The list is loaded only when this header is
+installed for a fresh session / Pi startup. On `/reload`, the header stays
+visible but the wordmark is rendered in its frozen final state rather than
+replaying the animation.
 
 ## Hiding Pi's built-in startup listing
 
 Pi prints a `[Context] / [Skills] / [Extensions]` block into the chat at startup.
-That block is core (not a header), so an extension cannot replace it. To let this
-header's summary be the main thing at the top, `quietStartup` is enabled in
+That block is core (not a header), so an extension cannot replace it. To keep the
+startup focused on the intro animation and Recent History, `quietStartup` is enabled in
 `~/.pi/agent/settings.json`:
 
 ```json
@@ -46,7 +50,6 @@ This folder lives in `~/.pi/agent/extensions/`, so Pi auto-discovers it. No
 ## Commands
 
 - `/intro` — replay the intro animation in the current session.
-- `/recent` — refresh the delegated recent-work section.
 
 ## Customise
 
@@ -57,12 +60,12 @@ Open `index.ts` and edit the constants near the top:
   white sweep crest.
 - `HUE_SPREAD` / `ROW_HUE` / `CYCLE_SPEED` / `RAINBOW_SAT` / `RAINBOW_LIGHT` —
   the animated rainbow during the reveal.
+- `SHADOW_MUL` — light-mode shadow darkness; `SHADOW_DARK_BG` /
+  `SHADOW_DARK_MIX` — dark-mode shadow lift; `GHOST_MUL` / `GHOST_DARK_MIX` —
+  unrevealed-ghost brightness per mode.
 - `SWEEP_MS` — reveal duration; `SETTLE_MS` — rainbow→red morph duration.
 - `FRAME_MS` — frame interval while animating (lower = smoother, more CPU).
-- `HEADER_INDENT` — left inset for both the wordmark and delegated recent section.
-
-Configure recent-session count, LLM model, and cache behavior in
-`jaysean-recent-work` via `recentWork` settings.
+- `HEADER_INDENT` — left inset for the wordmark and Recent History.
 
 The animation is one-shot by design: the `setInterval` timer is cleared once the
 sweep finishes, so it does not burn CPU while you work. The timer is also
