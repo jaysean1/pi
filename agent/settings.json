@@ -1,6 +1,6 @@
 {
-  "defaultModel": "gpt-5.6-sol",
-  "defaultProvider": "openai-codex",
+  "defaultModel": "claude-fable-5",
+  "defaultProvider": "anthropic",
   "defaultThinkingLevel": "high",
   "lastChangelogVersion": "0.80.6",
   "packages": [
@@ -42,7 +42,8 @@
       ],
       "source": "npm:pi-chrome"
     },
-    "../../.vibe-island/pi-extension"
+    "../../.vibe-island/pi-extension",
+    "extensions/pi_cron_manager"
   ],
   "quietStartup": true,
   "terminal": {
