@@ -3,7 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,8 +92,20 @@ export async function validateTask(task, directory = taskDirectory(task?.id ?? "
       continue;
     }
     const promptPath = resolve(directory, stage.promptFile);
-    if (!isInside(directory, promptPath)) errors.push(`pipeline[${index}].promptFile escapes the task directory`);
-    else if (!(await pathExists(promptPath))) errors.push(`missing prompt file: ${stage.promptFile}`);
+    if (!isInside(directory, promptPath)) {
+      errors.push(`pipeline[${index}].promptFile escapes the task directory`);
+    } else if (!(await pathExists(promptPath))) {
+      errors.push(`missing prompt file: ${stage.promptFile}`);
+    } else {
+      try {
+        const [canonicalDirectory, canonicalPromptPath] = await Promise.all([realpath(directory), realpath(promptPath)]);
+        if (!isInside(canonicalDirectory, canonicalPromptPath)) {
+          errors.push(`pipeline[${index}].promptFile symlink escapes the task directory`);
+        }
+      } catch {
+        errors.push(`pipeline[${index}].promptFile cannot be resolved: ${stage.promptFile}`);
+      }
+    }
   }
   if (!task.model?.provider || !task.model?.id) errors.push("model.provider and model.id are required");
   if (!THINKING_LEVELS.has(task.model?.thinking)) errors.push("model.thinking is invalid");
@@ -104,7 +116,8 @@ export async function validateTask(task, directory = taskDirectory(task?.id ?? "
   }
   if (!new Set(["skip", "queue"]).has(task.overlapPolicy)) errors.push("overlapPolicy must be skip or queue");
   try {
-    const taskStat = await stat(join(directory, "task.json"));
+    const taskStat = await lstat(join(directory, "task.json"));
+    if (taskStat.isSymbolicLink()) errors.push("task.json must not be a symbolic link");
     if ((taskStat.mode & 0o002) !== 0) errors.push("task.json must not be world-writable");
   } catch {
     errors.push("task.json is missing");
@@ -302,12 +315,15 @@ export async function runTask(taskId, options = {}) {
   try {
     for (const stage of task.pipeline) {
       const stageStarted = Date.now();
-      const promptPath = resolve(directory, stage.promptFile);
+      const promptPath = await realpath(resolve(directory, stage.promptFile));
+      const canonicalDirectory = await realpath(directory);
+      if (!isInside(canonicalDirectory, promptPath)) throw new Error(`Stage prompt escapes task directory: ${stage.promptFile}`);
       let prompt = await readFile(promptPath, "utf8");
       if (previousOutput && stage.input !== "none") prompt += `\n\n## Previous stage output\n\n${previousOutput}`;
       const sessionDirectory = join(runDirectory, "sessions", stage.id);
       await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
       const args = [
+        "--no-extensions", "--no-skills", "--no-prompt-templates",
         "--mode", "json", "-p",
         "--session-dir", sessionDirectory,
         "--model", `${stage.model?.provider ?? task.model.provider}/${stage.model?.id ?? task.model.id}`,

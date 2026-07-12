@@ -2,9 +2,9 @@
 // Does not access the real user crontab or call a real model.
 
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 
@@ -132,13 +132,17 @@ test("preserves unmanaged crontab content", () => {
 test("runs a task through a fake Pi executable", async () => {
   await makeTask("runner-task");
   const fakePi = join(root, "fake-pi.mjs");
-  await writeFile(fakePi, `#!/usr/bin/env node\nimport{writeFileSync}from"node:fs";import{join}from"node:path";const args=process.argv.slice(2);const sessionDir=args[args.indexOf("--session-dir")+1];writeFileSync(join(sessionDir,"fake-session.jsonl"),"{}\\n");const message={role:"assistant",content:[{type:"text",text:"accepted"}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};\nconsole.log(JSON.stringify({type:"message_end",message}));\n`);
+  await writeFile(fakePi, `#!/usr/bin/env node\nimport{writeFileSync}from"node:fs";import{join}from"node:path";const args=process.argv.slice(2);const sessionDir=args[args.indexOf("--session-dir")+1];writeFileSync(join(sessionDir,"fake-session.jsonl"),"{}\\n");writeFileSync(join(sessionDir,"args.json"),JSON.stringify(args));const message={role:"assistant",content:[{type:"text",text:"accepted"}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};\nconsole.log(JSON.stringify({type:"message_end",message}));\n`);
   await chmod(fakePi, 0o755);
   const run = await core.runTask("runner-task", { force: true, trigger: "acceptance", piBin: fakePi });
   assert.equal(run.status, "succeeded");
   assert.equal(run.usage.input, 2);
   assert.match(run.sessionFile, /fake-session\.jsonl$/);
   assert.equal((await readFile(run.sessionFile, "utf8")).trim(), "{}");
+  const args = JSON.parse(await readFile(join(dirname(run.sessionFile), "args.json"), "utf8"));
+  assert.ok(args.includes("--no-extensions"));
+  assert.ok(args.includes("--no-skills"));
+  assert.ok(args.includes("--no-prompt-templates"));
   assert.equal((await readFile(join(run.directory, "final.md"), "utf8")).trim(), "accepted");
 });
 
@@ -158,4 +162,15 @@ test("rejects prompt traversal", async () => {
   await writeFile(join(root, "tasks", "bad-task", "task.json"), `${JSON.stringify(task, null, 2)}\n`);
   const validation = await core.validateTask(task, join(root, "tasks", "bad-task"));
   assert.ok(validation.errors.some((error) => error.includes("escapes")));
+});
+
+test("rejects prompt symlinks that escape the task directory", async () => {
+  const task = await makeTask("symlink-task");
+  const outside = join(root, "outside-prompt.md");
+  await writeFile(outside, "Untrusted outside prompt.\n");
+  const promptPath = join(root, "tasks", "symlink-task", "prompt.md");
+  await rm(promptPath);
+  await symlink(outside, promptPath);
+  const validation = await core.validateTask(task, join(root, "tasks", "symlink-task"));
+  assert.ok(validation.errors.some((error) => error.includes("symlink escapes")));
 });
