@@ -1,7 +1,7 @@
 {
   "defaultModel": "gpt-5.6-sol",
   "defaultProvider": "openai-codex",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "max",
   "enabledModels": [
     "anthropic/claude-opus-4-8",
     "anthropic/claude-fable-5",
