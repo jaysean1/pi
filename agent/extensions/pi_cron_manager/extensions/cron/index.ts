@@ -1,10 +1,9 @@
-// Registers the /cron TUI and narrow tools for Pi-managed scheduled tasks.
+// Registers the /cron TUI for Pi-managed scheduled tasks.
+// LLM-facing manager operations live in the bundled skill CLI, not global tools.
 // Does not mutate crontab or run side-effecting tasks without explicit confirmation.
 
 import { readFile } from "node:fs/promises";
-import { Type } from "typebox";
 import { complete, type UserMessage } from "@earendil-works/pi-ai/compat";
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
@@ -21,6 +20,7 @@ import {
 } from "../../src/core.mjs";
 import { buildFallbackWorkflow, describeSchedule, loadWorkflow, parseWorkflowResponse, saveWorkflow, WORKFLOW_SYSTEM_PROMPT, workflowSourceHash } from "../../src/workflow-v2.mjs";
 import { enableMouseWheel, isMouseSequence, parseWheelEvents } from "../../src/mouse.mjs";
+import { firstRunsFocus, moveRunsFocus, SCHEDULE_TOGGLE_FOCUS } from "../../src/run-focus.mjs";
 
 type DashboardAction =
   | { type: "close" }
@@ -129,7 +129,7 @@ class CronDashboard {
   private listScroll = 0;
   private contentScroll = 0;
   private runsFocus = false;
-  private selectedRun = 0;
+  private selectedRun = SCHEDULE_TOGGLE_FOCUS;
   private lastContentWidth = 80;
   private lastContentRows = 12;
   private readonly disableMouse: () => void;
@@ -162,6 +162,17 @@ class CronDashboard {
     this.loadError = undefined;
     this.listScroll = 0;
     this.ensureListSelection(this.bodyRows());
+    if (this.runsFocus) {
+      const current = this.current();
+      const next = moveRunsFocus(
+        this.selectedRun,
+        0,
+        Boolean(current?.task && !current.external),
+        current?.runs.length ?? 0,
+      );
+      if (next === null) this.runsFocus = false;
+      else this.selectedRun = next;
+    }
     this.requestWorkflow();
     this.tui.requestRender();
   }
@@ -190,7 +201,7 @@ class CronDashboard {
     } else if (matchesKey(data, Key.down)) {
       if (this.runsFocus) this.moveRunSelection(1);
       else this.moveSelection(1);
-    } else if (matchesKey(data, Key.enter) && this.tab === 0) this.openOrFocusRun();
+    } else if (matchesKey(data, Key.enter) && this.tab === 0) this.activateRunsSelection();
     else if (matchesKey(data, Key.pageUp)) this.scrollContent(-this.lastContentRows);
     else if (matchesKey(data, Key.pageDown)) this.scrollContent(this.lastContentRows);
     else if (matchesKey(data, Key.left)) {
@@ -217,26 +228,46 @@ class CronDashboard {
     if (this.views.length === 0) return;
     this.selected = (this.selected + delta % this.views.length + this.views.length) % this.views.length;
     this.contentScroll = 0;
-    this.selectedRun = 0;
+    this.selectedRun = SCHEDULE_TOGGLE_FOCUS;
     this.ensureListSelection(this.bodyRows());
     this.requestWorkflow();
   }
 
   private moveRunSelection(delta: number): void {
-    const runs = this.current()?.runs ?? [];
-    this.selectedRun = Math.max(0, Math.min(runs.length - 1, this.selectedRun + delta));
-    this.contentScroll = Math.max(0, this.selectedRun * 5 - 2);
-  }
-
-  private openOrFocusRun(): void {
     const view = this.current();
-    const runs = view?.runs ?? [];
-    if (!view || runs.length === 0) return;
-    if (!this.runsFocus) {
-      this.runsFocus = true;
+    const next = moveRunsFocus(
+      this.selectedRun,
+      delta,
+      Boolean(view?.task && !view.external),
+      view?.runs.length ?? 0,
+    );
+    if (next === null) {
+      this.runsFocus = false;
       return;
     }
-    const run = runs[this.selectedRun];
+    this.selectedRun = next;
+    const rowsBefore = next === SCHEDULE_TOGGLE_FOCUS
+      ? 0
+      : 5 + (view?.runs ?? []).slice(0, next).reduce((total, run) => total + (run.error ? 7 : 6), 0);
+    this.contentScroll = Math.max(0, rowsBefore - 2);
+  }
+
+  private activateRunsSelection(): void {
+    const view = this.current();
+    if (!view) return;
+    if (!this.runsFocus) {
+      const initial = firstRunsFocus(Boolean(view.task && !view.external), view.runs.length);
+      if (initial === null) return;
+      this.runsFocus = true;
+      this.selectedRun = initial;
+      this.contentScroll = 0;
+      return;
+    }
+    if (this.selectedRun === SCHEDULE_TOGGLE_FOCUS && view.task && !view.external) {
+      this.done({ type: "toggle", id: view.id });
+      return;
+    }
+    const run = view.runs[this.selectedRun];
     if (run?.sessionFile) this.done({ type: "resume-run", id: view.id, runId: run.runId, sessionFile: run.sessionFile });
   }
 
@@ -244,7 +275,7 @@ class CronDashboard {
     this.tab = (this.tab + TABS.length + delta) % TABS.length;
     this.contentScroll = 0;
     this.runsFocus = false;
-    this.selectedRun = 0;
+    this.selectedRun = SCHEDULE_TOGGLE_FOCUS;
     this.requestWorkflow();
   }
 
@@ -341,8 +372,23 @@ class CronDashboard {
         `${th.fg("muted", "Tools")}     ${task.tools.join(", ")}`,
       ];
     }
-    if (view.runs.length === 0) return [th.fg("dim", "No run records")];
-    return view.runs.flatMap((run, index) => {
+    const toggleSelected = this.runsFocus && this.selectedRun === SCHEDULE_TOGGLE_FOCUS;
+    const togglePrefix = toggleSelected ? th.fg("accent", "›") : " ";
+    const toggleState = task.enabled ? th.fg("success", "● ON ") : th.fg("dim", "○ OFF");
+    const toggleStatus = task.enabled ? th.fg("success", "Active") : th.fg("muted", "Paused");
+    const toggleTitle = `${togglePrefix} Schedule  [ ${toggleState} ]  ${toggleStatus}`;
+    const lines = [
+      th.fg("muted", "Quick schedule control"),
+      toggleSelected ? th.bg("selectedBg", toggleTitle) : toggleTitle,
+      `   ${th.fg("dim", task.enabled ? "Enter to pause this task and review the crontab change." : "Enter to enable this task and review the crontab change.")}`,
+      "",
+      th.fg("muted", "Run history"),
+    ];
+    if (view.runs.length === 0) {
+      lines.push(th.fg("dim", "  No run records"));
+      return lines;
+    }
+    lines.push(...view.runs.flatMap((run, index) => {
       const selected = this.runsFocus && index === this.selectedRun;
       const prefix = selected ? th.fg("accent", "›") : " ";
       const status = run.status === "succeeded" ? th.fg("success", "✓") : run.status === "failed" ? th.fg("error", "✗") : th.fg("warning", "○");
@@ -356,7 +402,8 @@ class CronDashboard {
         `    ${th.fg("dim", displayPath(run.directory))}`,
         "",
       ];
-    });
+    }));
+    return lines;
   }
 
   private wrappedContent(view: TaskView, width: number): string[] {
@@ -452,8 +499,8 @@ class CronDashboard {
     }
     lines.push(th.fg("border", "─".repeat(width)));
     const help = this.runsFocus
-      ? "↑↓ history  Enter open saved session  ←/Esc task list  touchpad/PgUp/PgDn scroll"
-      : "↑↓ task  ←→ tab  Runs: Enter history  touchpad/PgUp/PgDn scroll  n new  r run  space toggle  g refresh  esc close";
+      ? "↑↓ switch/history  Enter toggle/open  ←/Esc task list  touchpad/PgUp/PgDn scroll"
+      : "↑↓ task  ←→ tab  Runs: Enter controls  touchpad/PgUp/PgDn scroll  n new  r run  space toggle  g refresh  esc close";
     lines.push(truncateToWidth(th.fg("dim", help), width));
     return lines.slice(0, this.tui.terminal.rows);
   }
@@ -720,73 +767,4 @@ export default function cronExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "cron_task_list",
-    label: "Cron Tasks",
-    description: "List Pi-managed cron tasks and validation status.",
-    parameters: Type.Object({}),
-    async execute() {
-      const tasks = await listTasks();
-      const data = tasks.map((item) => ({ id: item.id, name: item.task?.name, enabled: item.task?.enabled, schedule: item.task?.schedule, model: item.task?.model, errors: item.validation.errors }));
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: { tasks: data } };
-    },
-  });
-
-  pi.registerTool({
-    name: "cron_task_get",
-    label: "Cron Task",
-    description: "Get one Pi-managed cron task and its recent runs.",
-    parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params) {
-      const loaded = await loadTask(params.id);
-      const runs = await listRuns(params.id, 10);
-      const data = { task: loaded.task, validation: loaded.validation, runs };
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data };
-    },
-  });
-
-  pi.registerTool({
-    name: "cron_task_run",
-    label: "Run Cron Task",
-    description: "Run a Pi-managed task. This executes the real prompt and may cause external side effects.",
-    parameters: Type.Object({ id: Type.String(), confirmSideEffects: Type.Boolean() }),
-    async execute(_id, params, _signal, _update, ctx) {
-      if (!params.confirmSideEffects) throw new Error("confirmSideEffects must be true");
-      if (ctx.hasUI && !(await ctx.ui.confirm("Run scheduled task?", `${params.id}\nThis may cause external side effects.`))) throw new Error("Cancelled by user");
-      const run = await runTask(params.id, { trigger: "manual", force: true });
-      return { content: [{ type: "text", text: JSON.stringify(run, null, 2) }], details: run };
-    },
-  });
-
-  pi.registerTool({
-    name: "cron_task_sync_schedule",
-    label: "Sync Cron Schedule",
-    description: "Preview or install the managed user crontab block. Defaults to preview only.",
-    parameters: Type.Object({ execute: Type.Optional(Type.Boolean({ default: false })) }),
-    async execute(_id, params, _signal, _update, ctx) {
-      if (!params.execute) {
-        const plan = await planCrontab();
-        return { content: [{ type: "text", text: plan.next }], details: plan };
-      }
-      if (!ctx.hasUI) throw new Error("Schedule installation requires TUI confirmation");
-      const plan = await planCrontab();
-      if (!(await ctx.ui.confirm("Install managed crontab?", plan.next))) throw new Error("Cancelled by user");
-      const result = await syncCrontab({ execute: true, expectedCurrent: plan.current });
-      return { content: [{ type: "text", text: result.executed ? "Managed crontab installed and verified." : "No change required." }], details: result };
-    },
-  });
-
-  pi.registerTool({
-    name: "cron_task_set_status",
-    label: "Set Cron Task Status",
-    description: "Enable or pause a managed task, then optionally install its crontab change.",
-    parameters: Type.Object({ id: Type.String(), status: StringEnum(["enabled", "paused"] as const), sync: Type.Optional(Type.Boolean({ default: false })) }),
-    async execute(_id, params, _signal, _update, ctx) {
-      const enabled = params.status === "enabled";
-      if (params.sync && (!ctx.hasUI || !(await ctx.ui.confirm("Change scheduled task?", `${params.id} → ${params.status}`)))) throw new Error("TUI confirmation is required");
-      await setTaskEnabled(params.id, enabled);
-      const syncResult = params.sync ? await syncCrontab({ execute: true }) : await planCrontab();
-      return { content: [{ type: "text", text: `${params.id} is ${params.status}. ${params.sync ? "Crontab synced." : "Crontab not changed."}` }], details: syncResult };
-    },
-  });
 }
