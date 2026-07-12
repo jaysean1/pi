@@ -16,7 +16,9 @@ import { AuthStorage, type ExtensionAPI, type ExtensionContext, type Theme } fro
 import {
 	fetchClaudeUsageWithToken,
 	formatReset,
+	readClaudeUsageCache,
 	readCodexUsage,
+	writeClaudeUsageCache,
 	type FetchResult,
 	type Usage,
 	type UsageWindow,
@@ -28,10 +30,12 @@ const STATUS_KEY = "codex-claude-usage";
 const REFRESH_MS = 60_000;
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 const PI_AUTH_PATH = path.join(PI_AGENT_DIR, "auth.json");
+const CLAUDE_CACHE_PATH = path.join(path.dirname(PI_AGENT_DIR), "cache", "claude-usage.json");
 // The OAuth /usage endpoint is aggressively rate-limited (429 with no real
 // retry-after). Poll it hourly; manual /usage can force a refresh.
 const OAUTH_MIN_INTERVAL_MS = 60 * 60 * 1000;
 const OAUTH_MAX_BACKOFF_MS = 60 * 60 * 1000;
+const CLAUDE_CACHE_STALE_MS = 75 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Claude: query Anthropic OAuth usage endpoint directly
@@ -48,7 +52,7 @@ async function readClaudeToken(ctx?: ExtensionContext): Promise<string | undefin
 
 export async function fetchClaudeUsage(ctx?: ExtensionContext): Promise<FetchResult> {
 	const token = await readClaudeToken(ctx);
-	if (!token) return {};
+	if (!token) return { failure: "unauthorised" };
 	return fetchClaudeUsageWithToken(token);
 }
 
@@ -91,7 +95,8 @@ function paintWindow(theme: Theme, label: string, win: UsageWindow): string {
 
 function paintTool(theme: Theme, name: string, usage: Usage | undefined): string {
 	const dim = (s: string) => theme.fg("dim", s);
-	const stale = usage?.stale ? ` ${dim("(stale)")}` : "";
+	const cacheExpired = usage?.updatedMs !== undefined && Date.now() - usage.updatedMs > CLAUDE_CACHE_STALE_MS;
+	const stale = usage?.stale || cacheExpired ? ` ${dim("(stale)")}` : "";
 	const head = `${theme.bold(theme.fg("accent", name))}${stale}`;
 	if (!usage || (!usage.fiveHour && !usage.sevenDay)) {
 		return [head, dim("—")].join(paintSeparator(theme));
@@ -122,9 +127,10 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, line);
 	}
 
-	async function refresh(ctx: ExtensionContext, forceClaude = false): Promise<void> {
-		if (!ctx.hasUI || inFlight) return;
+	async function refresh(ctx: ExtensionContext, forceClaude = false): Promise<boolean> {
+		if (!ctx.hasUI || inFlight) return false;
 		inFlight = true;
+		let claudeUpdated = false;
 		try {
 			let codex: Usage | undefined;
 			try {
@@ -133,18 +139,27 @@ export default function (pi: ExtensionAPI) {
 				codex = undefined;
 			}
 			if (codex) lastCodex = codex;
+
+			// Render the last successful response immediately. This prevents a blank
+			// Claude status on startup, reload, 429, auth refresh, or network failure.
+			if (!lastClaude) {
+				lastClaude = readClaudeUsageCache(CLAUDE_CACHE_PATH, CLAUDE_CACHE_STALE_MS);
+			}
 			render(ctx);
 
 			const claude = await refreshClaudeViaOAuth(ctx, forceClaude);
 			if (claude) {
 				lastClaude = claude;
+				writeClaudeUsageCache(CLAUDE_CACHE_PATH, claude);
+				claudeUpdated = true;
 				render(ctx);
 			}
 		} catch {
-			// never let the statusline crash the session
+			// Never let the statusline crash the session. The last good value remains visible.
 		} finally {
 			inFlight = false;
 		}
+		return claudeUpdated;
 	}
 
 	function stopTimer(): void {
@@ -178,8 +193,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("usage", {
 		description: "Refresh the Codex / Claude usage statusline",
 		handler: async (_args, ctx) => {
-			await refresh(ctx, true);
-			ctx.ui.notify("Usage statusline refreshed", "info");
+			const updated = await refresh(ctx, true);
+			if (updated) {
+				ctx.ui.notify("Usage statusline refreshed", "info");
+			} else if (lastClaude) {
+				ctx.ui.notify("Claude refresh failed; showing the last successful value", "warning");
+			} else {
+				ctx.ui.notify("Claude usage is unavailable", "warning");
+			}
 		},
 	});
 }

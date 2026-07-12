@@ -20,8 +20,11 @@ export interface Usage {
 	updatedMs?: number;
 }
 
+export type FetchFailure = "rate-limited" | "unauthorised" | "http" | "network" | "invalid-response";
+
 export interface FetchResult {
 	usage?: Usage;
+	failure?: FetchFailure;
 	rateLimited?: boolean;
 }
 
@@ -235,7 +238,7 @@ export function parseClaudeUsageResponse(data: unknown, nowMs = Date.now()): Usa
 }
 
 export async function fetchClaudeUsageWithToken(token: string): Promise<FetchResult> {
-	if (!token) return {};
+	if (!token) return { failure: "unauthorised" };
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), 10_000);
@@ -248,16 +251,84 @@ export async function fetchClaudeUsageWithToken(token: string): Promise<FetchRes
 			},
 			signal: controller.signal,
 		});
-		if (res.status === 429) return { rateLimited: true };
-		if (res.status === 401 || res.status === 403) return {};
-		if (!res.ok) return {};
+		if (res.status === 429) return { failure: "rate-limited", rateLimited: true };
+		if (res.status === 401 || res.status === 403) return { failure: "unauthorised" };
+		if (!res.ok) return { failure: "http" };
 		const data = await res.json();
 		const usage = parseClaudeUsageResponse(data);
-		return usage ? { usage } : {};
+		return usage ? { usage } : { failure: "invalid-response" };
 	} catch {
-		return {};
+		return { failure: "network" };
 	} finally {
 		clearTimeout(timer);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claude: persist the last successful response for startup and failure fallback
+// ---------------------------------------------------------------------------
+
+function cachedWindow(raw: unknown): UsageWindow | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const window = raw as { pct?: unknown; resetMs?: unknown };
+	if (typeof window.pct !== "number" || !Number.isFinite(window.pct)) return undefined;
+	const resetMs = typeof window.resetMs === "number" ? window.resetMs : NaN;
+	return { pct: window.pct, resetMs };
+}
+
+export function readClaudeUsageCache(
+	filePath: string,
+	staleAfterMs: number,
+	nowMs = Date.now(),
+): Usage | undefined {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (!raw || typeof raw !== "object") return undefined;
+
+	const cached = raw as { fiveHour?: unknown; sevenDay?: unknown; updatedMs?: unknown };
+	const fiveHour = cachedWindow(cached.fiveHour);
+	const sevenDay = cachedWindow(cached.sevenDay);
+	if (!fiveHour && !sevenDay) return undefined;
+
+	const updatedMs = typeof cached.updatedMs === "number" && Number.isFinite(cached.updatedMs)
+		? cached.updatedMs
+		: NaN;
+	return {
+		fiveHour,
+		sevenDay,
+		source: "cache",
+		stale: !Number.isFinite(updatedMs) || nowMs - updatedMs > staleAfterMs,
+		updatedMs,
+	};
+}
+
+export function writeClaudeUsageCache(filePath: string, usage: Usage): boolean {
+	if (!usage.fiveHour && !usage.sevenDay) return false;
+	const updatedMs = Number.isFinite(usage.updatedMs) ? usage.updatedMs : Date.now();
+	const payload = JSON.stringify({
+		version: 1,
+		fiveHour: usage.fiveHour,
+		sevenDay: usage.sevenDay,
+		updatedMs,
+	});
+	const directory = path.dirname(filePath);
+	const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		fs.mkdirSync(directory, { recursive: true });
+		fs.writeFileSync(temporary, `${payload}\n`, { encoding: "utf8", mode: 0o600 });
+		fs.renameSync(temporary, filePath);
+		return true;
+	} catch {
+		try {
+			fs.unlinkSync(temporary);
+		} catch {
+			// The temporary file may not have been created.
+		}
+		return false;
 	}
 }
 
