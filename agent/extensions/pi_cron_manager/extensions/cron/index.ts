@@ -3,6 +3,7 @@
 
 import { readFile } from "node:fs/promises";
 import { Type } from "typebox";
+import { complete, type UserMessage } from "@earendil-works/pi-ai/compat";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -18,6 +19,7 @@ import {
   splitManagedCrontab,
   syncCrontab,
 } from "../../src/core.mjs";
+import { buildFallbackWorkflow, describeSchedule, loadWorkflow, parseWorkflowResponse, saveWorkflow, WORKFLOW_SYSTEM_PROMPT, workflowSourceHash } from "../../src/workflow-v2.mjs";
 import { enableMouseWheel, isMouseSequence, parseWheelEvents } from "../../src/mouse.mjs";
 
 type DashboardAction =
@@ -29,12 +31,25 @@ type DashboardAction =
   | { type: "edit-prompt"; id: string }
   | { type: "resume-run"; id: string; runId: string; sessionFile: string };
 
+type WorkflowStep = { title: string; detail?: string };
+type Workflow = {
+  sourceHash: string;
+  summary: string;
+  steps: WorkflowStep[];
+  outcome: string;
+  generatedAt: string;
+  model: string;
+};
+
 type TaskView = {
   id: string;
   task: any;
   validation: { errors: string[]; warnings: string[] };
   runs: any[];
   prompt: string;
+  workflow?: Workflow;
+  workflowState?: "missing" | "loading" | "ready" | "error";
+  workflowError?: string;
   external?: boolean;
 };
 
@@ -45,6 +60,7 @@ let activeDashboardClose: (() => void) | undefined;
 let shortcutCleanup: (() => void) | undefined;
 let dashboardCache: TaskView[] | undefined;
 let dashboardRefresh: Promise<TaskView[]> | undefined;
+const workflowInitialisations = new Map<string, Promise<Workflow>>();
 let lastShortcutAt = 0;
 
 function isCronShortcut(data: string): boolean {
@@ -62,6 +78,46 @@ function statusIcon(view: TaskView, theme: Theme): string {
   if (view.runs[0]?.status === "failed") return theme.fg("error", "!");
   if (view.task?.enabled) return theme.fg("success", "●");
   return theme.fg("dim", "○");
+}
+
+export function asciiBlock(
+  theme: Theme,
+  label: string,
+  title: string,
+  detail: string,
+  availableWidth: number,
+  tone: "accent" | "success" | "muted" = "accent",
+): string[] {
+  const canvasWidth = Math.max(1, availableWidth);
+  if (canvasWidth < 16) {
+    return wrapTextWithAnsi(`[${label}] ${title}${detail ? ` - ${detail}` : ""}`, canvasWidth);
+  }
+  const boxWidth = Math.min(68, canvasWidth - 2);
+  const innerWidth = boxWidth - 4;
+  const indent = " ".repeat(Math.max(0, Math.floor((canvasWidth - boxWidth) / 2)));
+  const border = `+${"-".repeat(boxWidth - 2)}+`;
+  const titleLines = wrapTextWithAnsi(`[${label}] ${title}`, innerWidth);
+  const detailLines = detail ? wrapTextWithAnsi(detail, innerWidth) : [];
+  const row = (text: string, colour?: "accent" | "success" | "muted") => {
+    const content = padAnsi(text, innerWidth);
+    const line = `| ${content} |`;
+    return indent + (colour ? theme.fg(colour, line) : line);
+  };
+  return [
+    indent + theme.fg("border", border),
+    ...titleLines.map((line) => row(line, tone)),
+    ...(detailLines.length ? [indent + theme.fg("border", `| ${"-".repeat(innerWidth)} |`), ...detailLines.map((line) => row(line))] : []),
+    indent + theme.fg("border", border),
+  ];
+}
+
+export function asciiConnector(theme: Theme, availableWidth: number): string[] {
+  const canvasWidth = Math.max(1, availableWidth);
+  if (canvasWidth < 16) return [theme.fg("border", truncateToWidth("v", canvasWidth))];
+  const boxWidth = Math.min(68, canvasWidth - 2);
+  const column = Math.max(0, Math.floor((canvasWidth - boxWidth) / 2) + Math.floor(boxWidth / 2));
+  const indent = " ".repeat(column);
+  return [theme.fg("border", `${indent}|`), theme.fg("border", `${indent}v`)];
 }
 
 class CronDashboard {
@@ -86,6 +142,7 @@ class CronDashboard {
     initialViews: TaskView[],
     private readonly theme: Theme,
     private readonly done: (action: DashboardAction) => void,
+    private readonly initialiseWorkflow: (view: TaskView) => Promise<Workflow>,
     loading = false,
   ) {
     this.views = initialViews;
@@ -105,6 +162,7 @@ class CronDashboard {
     this.loadError = undefined;
     this.listScroll = 0;
     this.ensureListSelection(this.bodyRows());
+    this.requestWorkflow();
     this.tui.requestRender();
   }
 
@@ -161,6 +219,7 @@ class CronDashboard {
     this.contentScroll = 0;
     this.selectedRun = 0;
     this.ensureListSelection(this.bodyRows());
+    this.requestWorkflow();
   }
 
   private moveRunSelection(delta: number): void {
@@ -186,6 +245,28 @@ class CronDashboard {
     this.contentScroll = 0;
     this.runsFocus = false;
     this.selectedRun = 0;
+    this.requestWorkflow();
+  }
+
+  private requestWorkflow(): void {
+    const view = this.current();
+    if (this.tab !== 3 || !view?.task || view.external || view.workflowState === "ready" || view.workflowState === "loading") return;
+    view.workflowState = "loading";
+    view.workflowError = undefined;
+    this.tui.requestRender();
+    void this.initialiseWorkflow(view).then(
+      (workflow) => {
+        view.workflow = workflow;
+        view.workflowState = "ready";
+        this.contentScroll = 0;
+        this.tui.requestRender();
+      },
+      (error) => {
+        view.workflowState = "error";
+        view.workflowError = error instanceof Error ? error.message : String(error);
+        this.tui.requestRender();
+      },
+    );
   }
 
   private current(): TaskView | undefined {
@@ -218,13 +299,39 @@ class CronDashboard {
     }
     if (this.tab === 2) return view.prompt.split("\n");
     if (this.tab === 3) {
-      return task.pipeline.flatMap((stage: any, index: number) => [
-        `${th.fg("accent", `${index + 1}.`)} ${th.bold(stage.name ?? stage.id)}`,
-        `   Prompt: ${stage.promptFile}`,
-        `   Input: ${stage.input ?? "none"}`,
-        `   Continue on error: ${stage.continueOnError ? "yes" : "no"}`,
+      if (view.workflowState === "loading") {
+        return [
+          th.fg("accent", "◌ 正在理解自动化流程…"),
+          "",
+          th.fg("dim", "流程会根据任务描述和提示词生成一次，然后保存在本地缓存中。"),
+        ];
+      }
+      if (view.workflowState === "error") {
+        return [
+          th.fg("error", "流程初始化失败"),
+          view.workflowError ?? "未知错误",
+          "",
+          th.fg("dim", "离开并重新打开此标签页即可重试。"),
+        ];
+      }
+      const workflow = view.workflow;
+      if (!workflow) return [th.fg("dim", "流程正在等待初始化。")];
+      const diagramWidth = Math.max(12, this.lastContentWidth);
+      const lines = [
+        th.fg("accent", th.bold("自动化工作流程")),
+        workflow.summary,
         "",
-      ]);
+        ...asciiBlock(th, "触发", "自动开始运行", describeSchedule(task.schedule.cron, task.schedule.timezone), diagramWidth, "muted"),
+      ];
+      workflow.steps.forEach((step, index) => {
+        lines.push(...asciiConnector(th, diagramWidth));
+        lines.push(...asciiBlock(th, String(index + 1).padStart(2, "0"), step.title, step.detail ?? "", diagramWidth));
+      });
+      lines.push(...asciiConnector(th, diagramWidth));
+      lines.push(...asciiBlock(th, "结果", "流程执行完成", workflow.outcome, diagramWidth, "success"));
+      const generator = workflow.model === "local/fallback" ? "本地规则" : workflow.model;
+      lines.push("", th.fg("dim", `生成方式：${generator} | ${task.pipeline.length} 个执行阶段`));
+      return lines;
     }
     if (this.tab === 4) {
       return [
@@ -253,7 +360,17 @@ class CronDashboard {
   }
 
   private wrappedContent(view: TaskView, width: number): string[] {
-    return this.content(view).flatMap((line) => line === "" ? [""] : wrapTextWithAnsi(line, Math.max(1, width)));
+    try {
+      return this.content(view).flatMap((line) => line === "" ? [""] : wrapTextWithAnsi(line, Math.max(1, width)));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return [
+        this.theme.fg("error", "Pipeline 渲染失败"),
+        ...wrapTextWithAnsi(message, Math.max(1, width)),
+        "",
+        this.theme.fg("dim", "按 g 刷新；若问题持续，请重新加载扩展。"),
+      ];
+    }
   }
 
   private maxContentScroll(): number {
@@ -352,7 +469,17 @@ async function buildViews(): Promise<TaskView[]> {
         : Promise.resolve(""),
       listRuns(item.id, 20),
     ]);
-    return { id: item.id, task: item.task, validation: item.validation, runs, prompt };
+    const sourceHash = workflowSourceHash(item.task?.description, prompt);
+    const workflow = item.task ? await loadWorkflow(item.id, sourceHash) : null;
+    return {
+      id: item.id,
+      task: item.task,
+      validation: item.validation,
+      runs,
+      prompt,
+      workflow: workflow ?? undefined,
+      workflowState: workflow ? "ready" : "missing",
+    };
   }));
   const unmanaged = splitManagedCrontab(currentCrontab);
   const externalLines = [unmanaged.before, unmanaged.after].join("\n").split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !/^\w+=/.test(line));
@@ -382,6 +509,66 @@ function prioritiseView(views: TaskView[], id?: string): TaskView[] {
   return ordered;
 }
 
+async function initialiseTaskWorkflow(view: TaskView, ctx: ExtensionContext | ExtensionCommandContext): Promise<Workflow> {
+  const existing = workflowInitialisations.get(view.id);
+  if (existing) return existing;
+  const initialisation = (async () => {
+    const sourceHash = workflowSourceHash(view.task.description, view.prompt);
+    const userMessage: UserMessage = {
+      role: "user",
+      content: [{
+        type: "text",
+        text: `Task description:\n${view.task.description || "No separate description."}\n\nTask prompt:\n${view.prompt}`,
+      }],
+      timestamp: Date.now(),
+    };
+    let parsed: Omit<Workflow, "sourceHash" | "generatedAt" | "model">;
+    let generator = "local/fallback";
+    try {
+      const configuredModel = ctx.modelRegistry.find(view.task.model.provider, view.task.model.id);
+      const model = configuredModel ?? ctx.model;
+      if (!model) throw new Error("No workflow model is available");
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? `No API key for ${model.provider}` : auth.error);
+      const response = await complete(
+        model,
+        { systemPrompt: WORKFLOW_SYSTEM_PROMPT, messages: [userMessage] },
+        {
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          env: auth.env,
+          maxTokens: 800,
+          timeoutMs: 15_000,
+          maxRetries: 0,
+        },
+      );
+      if (response.stopReason !== "stop") throw new Error(`model stopped with ${response.stopReason}`);
+      const text = response.content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+      parsed = parseWorkflowResponse(text);
+      generator = `${model.provider}/${model.id}`;
+    } catch {
+      parsed = buildFallbackWorkflow(view.task.description, view.prompt);
+    }
+    const workflow: Workflow = {
+      ...parsed,
+      sourceHash,
+      generatedAt: new Date().toISOString(),
+      model: generator,
+    };
+    await saveWorkflow(view.id, workflow);
+    return workflow;
+  })();
+  workflowInitialisations.set(view.id, initialisation);
+  try {
+    return await initialisation;
+  } finally {
+    workflowInitialisations.delete(view.id);
+  }
+}
+
 async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, initialId?: string): Promise<void> {
   let requestedId = initialId;
   while (true) {
@@ -394,7 +581,7 @@ async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, in
     const action = await ctx.ui.custom<DashboardAction>(
       (tui, theme, _keybindings, done) => {
         activeDashboardClose = () => done({ type: "close" });
-        dashboard = new CronDashboard(tui, initialViews, theme, done, true);
+        dashboard = new CronDashboard(tui, initialViews, theme, done, (view) => initialiseTaskWorkflow(view, ctx), true);
         void refresh.then(
           (views) => {
             if (overlayOpen) dashboard?.setViews(prioritiseView(views, selectedId));

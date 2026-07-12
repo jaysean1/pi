@@ -10,7 +10,9 @@ import { mkdtemp } from "node:fs/promises";
 
 const root = await mkdtemp(join(tmpdir(), "pi-cron-test-"));
 process.env.PI_CRON_ROOT = root;
-const core = await import(`../src/core.mjs?test=${Date.now()}`);
+const cacheBust = Date.now();
+const core = await import(`../src/core.mjs?test=${cacheBust}`);
+const workflowStore = await import(`../src/workflow-v2.mjs?test=${cacheBust}`);
 
 async function makeTask(id = "safe-task") {
   const directory = join(root, "tasks", id);
@@ -40,6 +42,73 @@ test("validates a complete paused task", async () => {
   const task = await makeTask();
   const validation = await core.validateTask(task, join(root, "tasks", task.id));
   assert.deepEqual(validation.errors, []);
+});
+
+test("uses a versioned workflow module with the complete hot-reload contract", async () => {
+  const extensionSource = await readFile(join(process.cwd(), "extensions", "cron", "index.ts"), "utf8");
+  assert.match(extensionSource, /src\/workflow-v2\.mjs/);
+  for (const name of ["buildFallbackWorkflow", "describeSchedule", "loadWorkflow", "parseWorkflowResponse", "saveWorkflow", "workflowSourceHash"]) {
+    assert.equal(typeof workflowStore[name], "function", `${name} must be exported`);
+  }
+  assert.equal(typeof workflowStore.WORKFLOW_SYSTEM_PROMPT, "string");
+});
+
+test("parses a concise fenced Chinese workflow response", () => {
+  const parsed = workflowStore.parseWorkflowResponse(`\`\`\`json
+{"summary":"生成并交付报告。","steps":[{"title":"收集数据"},{"title":"验证结果"},{"title":"交付报告"}],"outcome":"报告交付完成。"}
+\`\`\``);
+  assert.equal(parsed.summary, "生成并交付报告。");
+  assert.deepEqual(parsed.steps.map((step) => step.title), ["收集数据", "验证结果", "交付报告"]);
+  assert.equal(parsed.outcome, "报告交付完成。");
+});
+
+test("rejects a model workflow that is not Chinese", () => {
+  assert.throws(
+    () => workflowStore.parseWorkflowResponse('{"summary":"Build report","steps":[{"title":"Collect"},{"title":"Validate"},{"title":"Deliver"}],"outcome":"Done"}'),
+    /must use Chinese/,
+  );
+  assert.throws(
+    () => workflowStore.parseWorkflowResponse('{"summary":"生成报告","steps":[{"title":"Collect"},{"title":"验证结果"},{"title":"交付报告"}],"outcome":"报告完成"}'),
+    /must use Chinese/,
+  );
+});
+
+test("builds a useful local workflow when model generation fails", () => {
+  const parsed = workflowStore.buildFallbackWorkflow(
+    "Update terminal agents.",
+    "Objective: keep terminal coding agents updated every morning.\n1. Read workspace rules.\n2. Run the update script.\n3. Stop on validation failure.\n4. Report before and after versions.",
+  );
+  assert.match(parsed.summary, /任务规则/);
+  assert.ok(parsed.steps.length >= 3 && parsed.steps.length <= 7);
+  assert.ok(parsed.steps.some((step) => step.title === "执行核心流程"));
+  assert.ok(parsed.steps.some((step) => step.title === "验证处理结果"));
+  assert.ok(parsed.steps.some((step) => step.title === "汇报运行结果"));
+  assert.ok(parsed.steps.every((step) => /[\u3400-\u9fff]/.test(`${step.title}${step.detail}`)));
+});
+
+test("describes common cron schedules in natural Chinese", () => {
+  assert.equal(workflowStore.describeSchedule("5 7 * * *", "Australia/Sydney"), "每天 07:05 自动运行（悉尼时间）");
+  assert.equal(workflowStore.describeSchedule("30 16 * * 5", "Australia/Sydney"), "每周五 16:30 自动运行（悉尼时间）");
+  assert.equal(workflowStore.describeSchedule("0 18 * * 2,3,4,5,6", "Australia/Sydney"), "每周二至周六 18:00 自动运行（悉尼时间）");
+});
+
+test("caches a workflow until its source prompt changes", async () => {
+  const sourceHash = workflowStore.workflowSourceHash("Test task", "Collect data, validate it, then report.");
+  const workflow = {
+    sourceHash,
+    summary: "Produce a checked report.",
+    steps: [
+      { title: "Collect data" },
+      { title: "Validate result" },
+      { title: "Report outcome" },
+    ],
+    outcome: "A checked report is available.",
+    generatedAt: "2026-07-12T00:00:00Z",
+    model: "test/fake-model",
+  };
+  await workflowStore.saveWorkflow("safe-task", workflow);
+  assert.deepEqual(await workflowStore.loadWorkflow("safe-task", sourceHash), workflow);
+  assert.equal(await workflowStore.loadWorkflow("safe-task", workflowStore.workflowSourceHash("Test task", "Changed prompt")), null);
 });
 
 test("lists tasks in stable alphabetical order", async () => {

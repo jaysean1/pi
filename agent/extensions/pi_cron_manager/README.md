@@ -60,6 +60,7 @@ Codex automation import can be added later as an explicit migration workflow.
     │   ├── stderr.log
     │   └── final.md
     ├── locks/<task-id>.lock
+    ├── workflows/<task-id>.json       # One-time prompt-derived workflow cache
     └── tmp/
 ```
 
@@ -79,6 +80,7 @@ The folder is a local Pi package with this manifest shape:
     "skills": ["./skills/create-cron-job/SKILL.md"]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
@@ -301,7 +303,13 @@ Renders the full `prompt.md` with line wrapping and scrolling. Press `e` to insp
 
 #### Pipeline
 
-Shows numbered stages, stage prompt file, input source, model override, tools, and failure policy. Enter opens the selected stage prompt.
+Shows the automation's working mechanism as a compact vertical Chinese ASCII flow diagram. Trigger, processing steps, and outcome use width-aware bordered blocks connected with `|` and `v`. The trigger block converts the raw cron expression into natural Chinese, such as `每周五 16:30 自动运行（悉尼时间）`; the raw expression remains available in Overview. The first time this tab is opened for a task, the manager asks the configured task model to reduce `description` plus the task prompt into 3–7 sequential Chinese workflow nodes.
+
+If the model is unavailable, returns an error, or produces invalid JSON, the manager builds a deterministic local workflow from the task objective, input, validation, delivery, and reporting rules. Pipeline content therefore remains available without a successful model call.
+
+The generated workflow is cached under `.pi-cron/workflows/<task-id>.json`. Reopening the dashboard does not call the model again. A changed description or prompt produces a new source hash and triggers one fresh initialisation when Pipeline is opened again. The cache is explanatory only and never changes task execution.
+
+Workflow helpers use a versioned module entry point (`src/workflow-v2.mjs`). When that export contract changes, the module path must be versioned again so Pi hot reload cannot reuse a stale ESM namespace. The detail renderer also catches content errors and shows an in-panel recovery message instead of allowing an exception to terminate Pi.
 
 #### Model
 
