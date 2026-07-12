@@ -200,7 +200,8 @@ export default function kakuTabTitle(pi: ExtensionAPI) {
 	let provisionalTitle: string | undefined;
 	let titleAttempted = false;
 	let titleGeneration = 0;
-	let lastApplied: string | undefined;
+	let lastTerminalApplied: string | undefined;
+	let lastKakuApplied: string | undefined;
 
 	function currentBaseTitle(ctx: ExtensionContext): string {
 		return manualTitle || generatedTitle || provisionalTitle || projectTitle(ctx);
@@ -209,17 +210,31 @@ export default function kakuTabTitle(pi: ExtensionAPI) {
 	async function applyTitle(ctx: ExtensionContext, status?: "working") {
 		const base = currentBaseTitle(ctx);
 		const title = status === "working" ? sanitizeTitle(`${base} · working`) : base;
-		if (!title || title === lastApplied) return;
-		lastApplied = title;
+		if (!title) return;
 
-		ctx.ui.setTitle(title);
-		if (process.env.TERM_PROGRAM !== "Kaku") return;
-
-		try {
-			await pi.exec("kaku", ["cli", "set-tab-title", title], { timeout: 1000 });
-		} catch {
-			// ponytail: fallback ctx.ui.setTitle is enough outside Kaku CLI availability.
+		if (title !== lastTerminalApplied) {
+			ctx.ui.setTitle(title);
+			lastTerminalApplied = title;
 		}
+		if (process.env.TERM_PROGRAM !== "Kaku" || title === lastKakuApplied) return;
+
+		const paneArgs = process.env.WEZTERM_PANE ? ["--pane-id", process.env.WEZTERM_PANE] : [];
+		let lastError = "unknown error";
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			try {
+				const result = await pi.exec("kaku", ["cli", "set-tab-title", ...paneArgs, title], { timeout: 3000 });
+				if (!result.killed && result.code === 0) {
+					lastKakuApplied = title;
+					return;
+				}
+				lastError = `exit=${result.code}${result.killed ? ", killed" : ""}${result.stderr ? `: ${result.stderr.trim()}` : ""}`;
+			} catch (error) {
+				lastError = error instanceof Error ? error.message : String(error);
+			}
+			if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200));
+		}
+
+		console.warn(`[${STATE_TYPE}] Failed to apply Kaku tab title after 2 attempts: ${lastError}`);
 	}
 
 	async function startTitleGeneration(event: any, ctx: ExtensionContext) {
@@ -255,7 +270,8 @@ export default function kakuTabTitle(pi: ExtensionAPI) {
 		generatedTitle = undefined;
 		provisionalTitle = undefined;
 		titleAttempted = false;
-		lastApplied = undefined;
+		lastTerminalApplied = undefined;
+		lastKakuApplied = undefined;
 		titleGeneration++;
 
 		for (const entry of ctx.sessionManager.getBranch() as any[]) {
