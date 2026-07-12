@@ -22,6 +22,7 @@ agent/bin/
 
 # Cursor / Pi Studio runtime
 agent/cursor-model-cache.json
+agent/session-footer-switcher-cache.json
 agent/cursor-proxy.json
 agent/cursor-config.json
 agent/run-history.jsonl

@@ -8,9 +8,11 @@
 // Manual fallback: /sessions
 
 import { readFile, readdir, stat } from "node:fs/promises";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
 	CustomEditor,
+	getAgentDir,
 	SessionManager,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -46,6 +48,8 @@ const INTERNAL_COMMAND_SWITCH_ARG = "--switch";
 const INTERNAL_COMMAND_PREFIX = `/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`;
 const DEBUG_KEYS_ARG = "debug-keys";
 const PIN_CUSTOM_TYPE = "session-footer-switcher/pin";
+const AUTOMATION_RUNS_ROOT = "/Users/jayseanqian/Desktop/on_board/cron_jobs/.pi-cron/runs";
+type SessionTab = "project" | "automation";
 
 const TOGGLE_KEY = Key.superShift("left");
 const TOGGLE_SEQUENCE_COMMAND_SHIFT_LEFT = "\x1b[991~";
@@ -88,7 +92,51 @@ interface SessionItem {
 	pin?: SessionPin;
 }
 
-const sessionItemCache = new Map<string, { modifiedMs: number } & SessionDecorations>();
+type CachedDecoration = { modifiedMs: number } & SessionDecorations;
+const sessionItemCache = new Map<string, CachedDecoration>();
+
+// Persist decorated titles to disk so a freshly launched process (e.g. opening
+// the overlay via the keyboard shortcut in a brand-new session) can render real
+// session names on the very first frame instead of flashing placeholder
+// timestamps until the JSONL files finish hydrating. Entries carry the source
+// file's mtime, so a stale cache entry is ignored and re-hydrated on demand.
+let cacheLoadedFromDisk = false;
+let persistCacheTimer: ReturnType<typeof setTimeout> | undefined;
+
+function cacheFilePath(): string {
+	return join(getAgentDir(), "session-footer-switcher-cache.json");
+}
+
+function loadPersistedCacheOnce(): void {
+	if (cacheLoadedFromDisk) return;
+	cacheLoadedFromDisk = true;
+	try {
+		const raw = readFileSync(cacheFilePath(), "utf8");
+		const data = JSON.parse(raw) as Record<string, CachedDecoration>;
+		for (const [path, entry] of Object.entries(data)) {
+			if (entry && typeof entry.modifiedMs === "number" && entry.summary?.title) {
+				sessionItemCache.set(path, entry);
+			}
+		}
+	} catch {
+		// No cache yet or unreadable/corrupt file — start cold.
+	}
+}
+
+function schedulePersistCache(): void {
+	if (persistCacheTimer) clearTimeout(persistCacheTimer);
+	persistCacheTimer = setTimeout(() => {
+		persistCacheTimer = undefined;
+		try {
+			const obj: Record<string, CachedDecoration> = {};
+			for (const [path, value] of sessionItemCache) obj[path] = value;
+			writeFileSync(cacheFilePath(), JSON.stringify(obj));
+		} catch {
+			// Best-effort cache; ignore write failures.
+		}
+	}, 500);
+	persistCacheTimer.unref?.();
+}
 
 function parseSessionCreatedFromFilename(filePath: string, fallback: Date): Date {
 	const rawTimestamp = basename(filePath).split("_")[0];
@@ -106,6 +154,11 @@ function parseSessionIdFromFilename(filePath: string): string {
 
 function placeholderSessionTitle(created: Date): string {
 	return `Session ${created.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z")}`;
+}
+
+function defaultSessionDirForCwd(cwd: string): string {
+	const encoded = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	return join(getAgentDir(), "sessions", encoded);
 }
 
 async function listSessionsFast(cwd: string, sessionDir: string | undefined): Promise<SessionInfo[]> {
@@ -148,6 +201,142 @@ async function listSessionsFast(cwd: string, sessionDir: string | undefined): Pr
 	} catch {
 		// Fall back to Pi's canonical parser if the fast directory scan fails.
 		return SessionManager.list(cwd, sessionDir);
+	}
+}
+
+// Synchronous mirror of listSessionsFast, used only to seed the first render so
+// the overlay never shows an empty "loading" frame before the list appears.
+// Returns an empty array when the fast path is unsafe (custom shared dir), in
+// which case the caller falls back to the async load path.
+function listSessionsFastSync(cwd: string, sessionDir: string | undefined): SessionInfo[] {
+	if (!sessionDir) return [];
+	const expectedDefaultDirName = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	if (basename(sessionDir) !== expectedDefaultDirName) return [];
+
+	try {
+		const sessions = readdirSync(sessionDir)
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(sessionDir, file))
+			.map((filePath): SessionInfo | undefined => {
+				try {
+					const stats = statSync(filePath);
+					const created = parseSessionCreatedFromFilename(filePath, stats.birthtime);
+					return {
+						path: filePath,
+						id: parseSessionIdFromFilename(filePath),
+						cwd,
+						created,
+						modified: stats.mtime,
+						messageCount: 0,
+						firstMessage: placeholderSessionTitle(created),
+						allMessagesText: "",
+					};
+				} catch {
+					return undefined;
+				}
+			})
+			.filter((session): session is SessionInfo => Boolean(session));
+		return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	} catch {
+		return [];
+	}
+}
+
+async function listAutomationSessions(cwd: string): Promise<SessionInfo[]> {
+	try {
+		const taskEntries = await readdir(AUTOMATION_RUNS_ROOT, { withFileTypes: true });
+		const sessions: SessionInfo[] = [];
+		for (const taskEntry of taskEntries.filter((entry) => entry.isDirectory())) {
+			const taskRunsDir = join(AUTOMATION_RUNS_ROOT, taskEntry.name);
+			const runEntries = await readdir(taskRunsDir, { withFileTypes: true });
+			for (const runEntry of runEntries.filter((entry) => entry.isDirectory())) {
+				try {
+					const runPath = join(taskRunsDir, runEntry.name, "run.json");
+					const run = JSON.parse(await readFile(runPath, "utf8")) as {
+						runId?: string;
+						taskId?: string;
+						status?: string;
+						trigger?: string;
+						startedAt?: string;
+						finishedAt?: string;
+						sessionFile?: string;
+					};
+					if (!run.sessionFile) continue;
+					const sessionStats = await stat(run.sessionFile);
+					const created = run.startedAt ? new Date(run.startedAt) : sessionStats.birthtime;
+					const modified = run.finishedAt ? new Date(run.finishedAt) : sessionStats.mtime;
+					const taskId = run.taskId || taskEntry.name;
+					const runId = run.runId || runEntry.name;
+					sessions.push({
+						path: run.sessionFile,
+						id: runId,
+						cwd,
+						created: Number.isNaN(created.getTime()) ? sessionStats.birthtime : created,
+						modified: Number.isNaN(modified.getTime()) ? sessionStats.mtime : modified,
+						messageCount: 0,
+						firstMessage: `${taskId} · ${run.status || "unknown"}`,
+						allMessagesText: "",
+						name: `${taskId} · ${run.status || "unknown"} · ${run.trigger || "cron"}`,
+					});
+				} catch {
+					// Ignore incomplete, removed, or pre-session run records.
+				}
+			}
+		}
+		return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	} catch {
+		return [];
+	}
+}
+
+// Synchronous mirror of listAutomationSessions, used only to seed the first
+// render so the Automation Runs tab never flashes an empty "loading" frame.
+// Automation titles come straight from run.json (name/firstMessage), so this
+// sync scan already yields real titles without any JSONL hydration.
+function listAutomationSessionsSync(cwd: string): SessionInfo[] {
+	try {
+		const taskEntries = readdirSync(AUTOMATION_RUNS_ROOT, { withFileTypes: true });
+		const sessions: SessionInfo[] = [];
+		for (const taskEntry of taskEntries.filter((entry) => entry.isDirectory())) {
+			const taskRunsDir = join(AUTOMATION_RUNS_ROOT, taskEntry.name);
+			const runEntries = readdirSync(taskRunsDir, { withFileTypes: true });
+			for (const runEntry of runEntries.filter((entry) => entry.isDirectory())) {
+				try {
+					const runPath = join(taskRunsDir, runEntry.name, "run.json");
+					const run = JSON.parse(readFileSync(runPath, "utf8")) as {
+						runId?: string;
+						taskId?: string;
+						status?: string;
+						trigger?: string;
+						startedAt?: string;
+						finishedAt?: string;
+						sessionFile?: string;
+					};
+					if (!run.sessionFile) continue;
+					const sessionStats = statSync(run.sessionFile);
+					const created = run.startedAt ? new Date(run.startedAt) : sessionStats.birthtime;
+					const modified = run.finishedAt ? new Date(run.finishedAt) : sessionStats.mtime;
+					const taskId = run.taskId || taskEntry.name;
+					const runId = run.runId || runEntry.name;
+					sessions.push({
+						path: run.sessionFile,
+						id: runId,
+						cwd,
+						created: Number.isNaN(created.getTime()) ? sessionStats.birthtime : created,
+						modified: Number.isNaN(modified.getTime()) ? sessionStats.mtime : modified,
+						messageCount: 0,
+						firstMessage: `${taskId} · ${run.status || "unknown"}`,
+						allMessagesText: "",
+						name: `${taskId} · ${run.status || "unknown"} · ${run.trigger || "cron"}`,
+					});
+				} catch {
+					// Ignore incomplete, removed, or pre-session run records.
+				}
+			}
+		}
+		return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	} catch {
+		return [];
 	}
 }
 
@@ -390,6 +579,7 @@ async function buildSessionItem(session: SessionInfo): Promise<SessionItem> {
 
 	const decorations = await readSessionDecorations(session);
 	sessionItemCache.set(session.path, { modifiedMs, ...decorations });
+	schedulePersistCache();
 	return { info: session, ...decorations };
 }
 
@@ -446,6 +636,10 @@ function isFocusableComponent(component: Component): component is Component & Fo
 // ---------------------------------------------------------------------------
 
 class SessionSwitcherOverlay implements Component, Focusable {
+	private activeTab: SessionTab;
+	private readonly tabItems = new Map<SessionTab, SessionItem[]>();
+	private readonly tabSessions = new Map<SessionTab, SessionInfo[]>();
+	private readonly tabLoadPromises = new Map<SessionTab, Promise<void>>();
 	private pinnedSessions: SessionItem[] = [];
 	private sessions: SessionItem[] = [];
 	private selectedIndex = 0;
@@ -476,7 +670,15 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		this.onSwitch = onSwitch;
 		this.onNewSession = onNewSession;
 		this.onClose = onClose;
+		this.activeTab = ctx.sessionManager.getSessionFile()?.startsWith(AUTOMATION_RUNS_ROOT) ? "automation" : "project";
+		// Warm the module cache from disk and synchronously seed the active tab so
+		// the very first render already shows the session list with real titles
+		// (when cached) instead of a "loading" frame followed by placeholder
+		// timestamps. The async reload below still runs to hydrate/refresh.
+		loadPersistedCacheOnce();
+		this.seedTabSync(this.activeTab);
 		void this.reload();
+		void this.preloadTab(this.activeTab === "project" ? "automation" : "project");
 	}
 
 	get focused(): boolean {
@@ -490,28 +692,76 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		}
 	}
 
+	// Populate a tab synchronously (fast per-cwd scan for project, run.json scan
+	// for automation) so the first paint of that tab has real content instead of
+	// an empty "loading" frame. Returns true when it seeded the given tab. Skips
+	// work when the tab is already cached. When the tab is the active one, the
+	// seeded items are applied immediately so the current render reflects them.
+	private seedTabSync(tab: SessionTab): boolean {
+		if (this.tabItems.has(tab)) return true;
+		const sessions = tab === "project"
+			? listSessionsFastSync(this.ctx.cwd, defaultSessionDirForCwd(this.ctx.cwd))
+			: listAutomationSessionsSync(this.ctx.cwd);
+		if (sessions.length === 0) return false;
+		const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		const items = sorted.map((session) => buildSessionItemFromCache(session));
+		this.tabSessions.set(tab, sorted);
+		this.tabItems.set(tab, items);
+		if (tab === this.activeTab) {
+			this.applyItems(items, false);
+			this.loading = false;
+		}
+		return true;
+	}
+
+	private async loadTab(tab: SessionTab): Promise<void> {
+		const existing = this.tabLoadPromises.get(tab);
+		if (existing) return existing;
+		const load = (async () => {
+			const sessions = tab === "project"
+				? await listSessionsFast(this.ctx.cwd, defaultSessionDirForCwd(this.ctx.cwd))
+				: await listAutomationSessions(this.ctx.cwd);
+			const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+			this.tabSessions.set(tab, sorted);
+			this.tabItems.set(tab, sorted.map((session) => buildSessionItemFromCache(session)));
+		})().finally(() => this.tabLoadPromises.delete(tab));
+		this.tabLoadPromises.set(tab, load);
+		return load;
+	}
+
+	private async preloadTab(tab: SessionTab): Promise<void> {
+		try {
+			await this.loadTab(tab);
+		} catch {
+			// The active tab reports errors; background preload stays silent.
+		}
+	}
+
 	async reload(): Promise<void> {
 		const seq = ++this.loadSeq;
-		this.loading = true;
+		const tab = this.activeTab;
 		this.error = undefined;
+		const cached = this.tabItems.get(tab);
+		if (cached) {
+			this.loading = false;
+			this.applyItems(cached, false);
+			this.tui.requestRender();
+			const sessions = this.tabSessions.get(tab) ?? [];
+			void this.hydrateSessions(seq, tab, sessions);
+			return;
+		}
+
+		this.loading = true;
 		this.tui.requestRender();
-
 		try {
-			const sessions = await listSessionsFast(this.ctx.cwd, this.ctx.sessionManager.getSessionDir());
-			const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-			if (seq !== this.loadSeq) return;
-
-			// Fast path: show the overlay after a cheap directory scan (stat only). Titles
-			// and pins use the in-memory cache when available; uncached files are hydrated
-			// below in the background so opening the switcher no longer blocks on reading
-			// every historical JSONL file.
-			this.applyItems(sorted.map((session) => buildSessionItemFromCache(session)), false);
+			await this.loadTab(tab);
+			if (seq !== this.loadSeq || tab !== this.activeTab) return;
+			this.applyItems(this.tabItems.get(tab) ?? [], false);
 			this.loading = false;
 			this.tui.requestRender();
-
-			void this.hydrateSessions(seq, sorted);
+			void this.hydrateSessions(seq, tab, this.tabSessions.get(tab) ?? []);
 		} catch (error) {
-			if (seq !== this.loadSeq) return;
+			if (seq !== this.loadSeq || tab !== this.activeTab) return;
 			this.error = error instanceof Error ? error.message : String(error);
 			this.loading = false;
 			this.tui.requestRender();
@@ -539,23 +789,10 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		this.ensureSelectedVisible();
 	}
 
-	private upsertHydratedItem(item: SessionItem): void {
-		const itemsByPath = new Map<string, SessionItem>();
-		for (const existing of [...this.pinnedSessions, ...this.sessions]) {
-			itemsByPath.set(existing.info.path, existing);
-		}
-		itemsByPath.set(item.info.path, item);
-		const items = Array.from(itemsByPath.values()).sort((a, b) => b.info.modified.getTime() - a.info.modified.getTime());
-		this.applyItems(items, true);
-	}
-
-	private async hydrateSessions(seq: number, sessions: SessionInfo[]): Promise<void> {
-		const items = await buildSessionItemsWithConcurrency(sessions, (item) => {
-			if (seq !== this.loadSeq) return;
-			this.upsertHydratedItem(item);
-			this.tui.requestRender();
-		});
-		if (seq !== this.loadSeq) return;
+	private async hydrateSessions(seq: number, tab: SessionTab, sessions: SessionInfo[]): Promise<void> {
+		const items = await buildSessionItemsWithConcurrency(sessions);
+		this.tabItems.set(tab, items);
+		if (seq !== this.loadSeq || tab !== this.activeTab) return;
 		this.applyItems(items, true);
 		this.loading = false;
 		this.tui.requestRender();
@@ -564,6 +801,16 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	handleInput(data: string): void {
 		if (isEscapeKey(data)) {
 			this.onClose();
+			return;
+		}
+
+		if (matchesKey(data, Key.left) || matchesKey(data, Key.shift("tab"))) {
+			this.switchTab(-1);
+			return;
+		}
+
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) {
+			this.switchTab(1);
 			return;
 		}
 
@@ -593,6 +840,16 @@ class SessionSwitcherOverlay implements Component, Focusable {
 
 		const lines: string[] = [];
 		lines.push(rule());
+		const projectLabel = " Project Sessions ";
+		const automationLabel = " Automation Runs ";
+		const projectTab = this.activeTab === "project"
+			? th.bg("selectedBg", th.fg("accent", th.bold(projectLabel)))
+			: th.fg("muted", projectLabel);
+		const automationTab = this.activeTab === "automation"
+			? th.bg("selectedBg", th.fg("accent", th.bold(automationLabel)))
+			: th.fg("muted", automationLabel);
+		lines.push(pad(`${projectTab} ${automationTab}`));
+		lines.push(rule());
 
 		if (this.error) {
 			lines.push(pad(th.fg("error", this.error)));
@@ -606,7 +863,8 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		// misaligned at the top of the overlay.
 		const sessionCount = this.pinnedSessions.length + this.sessions.length;
 		const position = this.selectedIndex === 0 ? "new session" : `${this.selectedIndex} of ${sessionCount}`;
-		lines.push(pad(`${th.fg("accent", th.bold("Sessions"))} ${th.fg("dim", `(${position})`)}`));
+		const sectionTitle = this.activeTab === "project" ? "Project Sessions" : "Automation Runs";
+		lines.push(pad(`${th.fg("accent", th.bold(sectionTitle))} ${th.fg("dim", `(${position})`)}`));
 
 		// "New session" entry — rendered as a bordered button (equivalent to /new).
 		lines.push(...this.renderNewSessionRow(w));
@@ -621,13 +879,16 @@ class SessionSwitcherOverlay implements Component, Focusable {
 			lines.push(rule());
 		}
 
-		lines.push(pad(th.fg("accent", th.bold("History Sessions"))));
+		lines.push(pad(th.fg("accent", th.bold(this.activeTab === "project" ? "History Sessions" : "Run Sessions"))));
 
-		// Session list area.
+		// Session list area. While the first async scan is still in flight and no
+		// items exist yet, render nothing here (no "loading sessions..." placeholder)
+		// so the tab bar, section titles, and New-session button show immediately
+		// and the list simply fills in once ready — avoids a loading flash.
 		if (this.loading && sessionCount === 0) {
-			lines.push(pad(th.fg("dim", "loading sessions...")));
+			// Intentionally blank during initial load.
 		} else if (sessionCount === 0) {
-			lines.push(pad(th.fg("dim", "no saved sessions")));
+			lines.push(pad(th.fg("dim", this.activeTab === "project" ? "no saved project sessions" : "no automation runs with saved sessions")));
 		} else if (this.sessions.length === 0) {
 			lines.push(pad(th.fg("dim", "no unpinned history sessions")));
 		} else {
@@ -651,7 +912,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 
 		// Footer: bottom rule and key hints.
 		lines.push(rule());
-		const help = this.notice ? th.fg("warning", this.notice) : "↑/↓ navigate · enter select · esc close";
+		const help = this.notice ? th.fg("warning", this.notice) : "←/→ or tab switch · ↑/↓ navigate · enter select · esc close";
 		lines.push(pad(th.fg("dim", help)));
 
 		return lines;
@@ -748,6 +1009,20 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		const pinnedIdx = this.selectedIndex - 1;
 		if (pinnedIdx < this.pinnedSessions.length) return this.pinnedSessions[pinnedIdx];
 		return this.sessions[this.selectedIndex - this.pinnedSessions.length - 1];
+	}
+
+	private switchTab(delta: number): void {
+		const tabs: SessionTab[] = ["project", "automation"];
+		const current = tabs.indexOf(this.activeTab);
+		this.activeTab = tabs[(current + delta + tabs.length) % tabs.length]!;
+		this.selectedIndex = 0;
+		this.scrollOffset = 0;
+		this.notice = undefined;
+		// Seed the target tab synchronously (when not already cached) so switching
+		// tabs paints the list immediately instead of flashing a "loading" frame
+		// while the async scan runs. reload() still refreshes/hydrates afterwards.
+		this.seedTabSync(this.activeTab);
+		void this.reload();
 	}
 
 	private move(delta: number): void {
