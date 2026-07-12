@@ -39,10 +39,11 @@ Codex automation import can be added later as an explicit migration workflow.
 ```text
 /Users/jayseanqian/.pi/agent/extensions/pi_cron_manager/
 ├── package.json                     # Pi package manifest
-├── extensions/cron/index.ts         # Registers /cron and cron tools
+├── extensions/cron/index.ts         # Registers /cron and its TUI only
 ├── src/                             # Storage, scheduler, runner, and TUI support
 ├── scripts/pi-cron-runner.mjs       # Stable cron entry point
 ├── skills/create-cron-job/          # Bundled configurable skill
+│   └── scripts/pi-cron-cli.mjs      # Skill-scoped manager CLI
 └── tests/
 
 /Users/jayseanqian/Desktop/on_board/cron_jobs/
@@ -82,8 +83,7 @@ The folder is a local Pi package with this manifest shape:
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-tui": "*"
   }
 }
 ```
@@ -186,6 +186,9 @@ For every pipeline stage, the runner spawns Pi without a shell:
 
 ```text
 pi
+--no-extensions
+--no-skills
+--no-prompt-templates
 --mode json
 -p
 --session-dir <run-directory>/sessions/<stage-id>
@@ -203,13 +206,14 @@ pi
 3. Acquire an atomic per-task lock.
 4. Create the run directory and initial `run.json`.
 5. Spawn `pi` with an argument array and `shell: false`.
-6. Stream Pi JSON events into `events.jsonl`.
-7. Capture standard output and standard error separately.
-8. Extract the last assistant text into `final.md`.
-9. Record stage usage, model, duration, exit code, and error details.
-10. Enforce timeout and terminate the process group safely.
-11. Apply run-retention rules after completion.
-12. Always release the task lock.
+6. Disable extension, skill, and prompt-template discovery in the child Pi process. Scheduled runs therefore cannot trigger unrelated global hooks, hidden model calls, or extra tool metadata; task prompts must be self-contained and use built-in providers/tools.
+7. Stream Pi JSON events into `events.jsonl`.
+8. Capture standard output and standard error separately.
+9. Extract the last assistant text into `final.md`.
+10. Record stage usage, model, duration, exit code, and error details.
+11. Enforce timeout and terminate the process safely.
+12. Apply run-retention rules after completion.
+13. Always release the task lock.
 
 ### Environment
 
@@ -291,7 +295,7 @@ Cron follows the host's local timezone. The manager therefore validates that mac
 
 #### Runs
 
-Shows the latest run first. Press Enter to focus history, choose a run with Up or Down, and press Enter again to resume its saved Pi session.
+Shows a quick schedule switch above the latest-first run history. With a managed task selected, press Enter to move focus into the Runs tab; the switch is selected first. Use Up and Down to move between the switch and history rows. Enter on the switch starts the existing reviewed pause/enable flow; Enter on a run resumes its saved Pi session. Left or Escape returns focus to the task list.
 
 #### Overview
 
@@ -337,6 +341,7 @@ Logs are rendered with width-safe truncation and scrolling. Full files remain av
 - Fast touchpad flicks aggregate all batched SGR or X10 wheel reports.
 - `PgUp`, `PgDn`, `Home`, and `End` provide keyboard scrolling.
 - Up and Down cycle through the task selector: Up from the first item selects the last, and Down from the last selects the first.
+- Inside the Runs tab, Up and Down move through the schedule switch and history rows, clamping at the first and last control.
 - Mouse reporting is restored automatically when the overlay closes.
 - All colours use Pi theme tokens and have been verified with both `dark` and `light` themes.
 - All rendered lines use `truncateToWidth()` or `wrapTextWithAnsi()`.
@@ -367,20 +372,24 @@ The extension registers:
 - `/cron <task-id>` — open a specific task.
 - `/cron runs <task-id>` — open its run list.
 
-### Agent tools
+### Skill-scoped CLI
 
-The bundled creation skill can use narrow tools instead of hand-editing the crontab:
+The extension intentionally registers no LLM tools, so ordinary Pi requests do not carry low-frequency Cron Manager tool definitions. After the `create-cron-job` skill is loaded, the agent uses:
 
-- `cron_task_list`
-- `cron_task_get`
-- `cron_task_validate`
-- `cron_task_save_draft`
-- `cron_task_sync_schedule`
-- `cron_task_run`
+```bash
+node skills/create-cron-job/scripts/pi-cron-cli.mjs <command>
+```
 
-Mutating tools return a preview by default. `cron_task_sync_schedule` requires `execute: true`, and still prompts in TUI mode. In print mode it refuses schedule mutation unless an explicit CLI approval mechanism is added in a later version.
+Commands:
 
-File mutations use Pi's file mutation queue. Tool output follows Pi's 50 KB and 2,000-line truncation limits.
+- `list` — read-only task and validation summary.
+- `get <task-id>` — read-only task and recent-run details.
+- `run <task-id> --confirm-side-effects` — real execution after explicit approval.
+- `sync-schedule` — read-only crontab preview with a current-content hash.
+- `sync-schedule --execute --confirm-schedule-change --expected-current-sha256 <hash>` — guarded, conflict-checked installation after review.
+- `set-status <task-id> <enabled|paused> --confirm-status-change` — task-definition mutation only; schedule synchronization remains a separate reviewed operation.
+
+The CLI invokes core functions directly without interpolated shell commands. Mutations fail closed unless their explicit confirmation flags are present. A schedule installation additionally requires the hash returned by the reviewed preview, preventing installation after an intervening crontab change.
 
 ## 13. `create-cron-job` Skill
 
@@ -483,8 +492,8 @@ Writes use a temporary file followed by an atomic rename. A crashed run left in 
 ### Security
 
 - Never invoke task IDs, model IDs, or paths through an interpolated shell command.
-- Resolve prompt and stage files inside the task directory.
-- Reject world-writable task definitions.
+- Resolve prompt and stage files inside the task directory, including canonical-path checks that reject escaping symlinks.
+- Reject world-writable or symlinked task definitions.
 - Create runtime directories and temporary files with user-only permissions.
 - Redact common secret patterns from TUI previews and logs.
 - Do not expose full environment variables in run metadata.
