@@ -49,6 +49,10 @@ const INTERNAL_COMMAND_PREFIX = `/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}
 const DEBUG_KEYS_ARG = "debug-keys";
 const PIN_CUSTOM_TYPE = "session-footer-switcher/pin";
 const AUTOMATION_RUNS_ROOT = "/Users/jayseanqian/Desktop/on_board/cron_jobs/.pi-cron/runs";
+// The automation workspace itself. Launching the TUI anywhere under this
+// directory means the user is working on cron jobs, so the overlay should
+// open on the Automation Runs tab by default.
+const AUTOMATION_WORKSPACE_ROOT = "/Users/jayseanqian/Desktop/on_board/cron_jobs";
 type SessionTab = "project" | "automation";
 
 const TOGGLE_KEY = Key.superShift("left");
@@ -59,16 +63,59 @@ const GLOBAL_STATE_KEY = "__sessionFooterSwitcherState";
 
 type FocusTarget = EditorComponent & Partial<Focusable>;
 type Cleanup = () => void;
-// Result returned by the overlay: switch to an existing session, or start a new one (/new).
-type OverlayResult = { type: "switch"; path: string } | { type: "new" };
+// Result returned by the overlay: switch to an existing session, or start a
+// new one in the directory the active tab represents (project cwd for the
+// Project tab, the automation workspace for the Automation Runs tab).
+type OverlayResult = { type: "switch"; path: string } | { type: "new"; tab: SessionTab };
 
 interface GlobalState {
 	cleanup?: Cleanup;
+	// Last known project working directory (a session_start whose session file is
+	// NOT under the automation runs root). After switching into an automation run
+	// session, the runtime cwd/sessionDir rebind to the run's private directory;
+	// this remembers where "Project Sessions" and "New session" should point back to.
+	projectCwd?: string;
 }
 
 function globalState(): GlobalState {
 	const root = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: GlobalState };
 	return (root[GLOBAL_STATE_KEY] ??= {});
+}
+
+function isPathInside(path: string, root: string): boolean {
+	return path === root || path.startsWith(`${root}/`);
+}
+
+function isAutomationSessionFile(sessionFile: string | undefined): boolean {
+	return sessionFile !== undefined && isPathInside(sessionFile, AUTOMATION_RUNS_ROOT);
+}
+
+// True while the runtime lives on the automation side: either an automation
+// run session (under .pi-cron/runs) or any session whose cwd sits inside the
+// automation workspace (e.g. a session created via the Automation tab's "New
+// session"). In this state the remembered projectCwd must not be overwritten,
+// so the Project tab and its "New session" keep pointing at the original
+// project directory.
+function isAutomationContext(ctx: ExtensionContext): boolean {
+	if (isAutomationSessionFile(ctx.sessionManager.getSessionFile())) return true;
+	return isPathInside(ctx.cwd, AUTOMATION_WORKSPACE_ROOT);
+}
+
+// Pick the tab the overlay should open on: any automation context (run
+// session, or cwd inside the automation workspace) starts on Automation Runs,
+// everything else on Project Sessions for the invoking directory.
+function preferredTabForContext(ctx: ExtensionContext): SessionTab {
+	return isAutomationContext(ctx) ? "automation" : "project";
+}
+
+// Resolve the directory the "Project Sessions" tab (and "New session") should
+// operate on. While in any automation context (run session, or a session in
+// the automation workspace) the runtime cwd points at the automation side, so
+// fall back to the remembered project cwd instead of losing the original
+// project the user invoked the TUI from.
+function resolveProjectCwd(ctx: ExtensionContext): string {
+	if (!isAutomationContext(ctx)) return ctx.cwd;
+	return globalState().projectCwd ?? ctx.cwd;
 }
 
 interface SessionSummary {
@@ -652,8 +699,9 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	private readonly tui: TUI;
 	private readonly theme: Theme;
 	private readonly ctx: ExtensionContext;
+	private readonly projectCwd: string;
 	private readonly onSwitch: (path: string) => void;
-	private readonly onNewSession: () => void;
+	private readonly onNewSession: (tab: SessionTab) => void;
 	private readonly onClose: () => void;
 
 	constructor(
@@ -661,7 +709,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		theme: Theme,
 		ctx: ExtensionContext,
 		onSwitch: (path: string) => void,
-		onNewSession: () => void,
+		onNewSession: (tab: SessionTab) => void,
 		onClose: () => void,
 	) {
 		this.tui = tui;
@@ -670,7 +718,8 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		this.onSwitch = onSwitch;
 		this.onNewSession = onNewSession;
 		this.onClose = onClose;
-		this.activeTab = ctx.sessionManager.getSessionFile()?.startsWith(AUTOMATION_RUNS_ROOT) ? "automation" : "project";
+		this.activeTab = preferredTabForContext(ctx);
+		this.projectCwd = resolveProjectCwd(ctx);
 		// Warm the module cache from disk and synchronously seed the active tab so
 		// the very first render already shows the session list with real titles
 		// (when cached) instead of a "loading" frame followed by placeholder
@@ -700,7 +749,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 	private seedTabSync(tab: SessionTab): boolean {
 		if (this.tabItems.has(tab)) return true;
 		const sessions = tab === "project"
-			? listSessionsFastSync(this.ctx.cwd, defaultSessionDirForCwd(this.ctx.cwd))
+			? listSessionsFastSync(this.projectCwd, defaultSessionDirForCwd(this.projectCwd))
 			: listAutomationSessionsSync(this.ctx.cwd);
 		if (sessions.length === 0) return false;
 		const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
@@ -719,7 +768,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 		if (existing) return existing;
 		const load = (async () => {
 			const sessions = tab === "project"
-				? await listSessionsFast(this.ctx.cwd, defaultSessionDirForCwd(this.ctx.cwd))
+				? await listSessionsFast(this.projectCwd, defaultSessionDirForCwd(this.projectCwd))
 				: await listAutomationSessions(this.ctx.cwd);
 			const sorted = sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 			this.tabSessions.set(tab, sorted);
@@ -1056,7 +1105,7 @@ class SessionSwitcherOverlay implements Component, Focusable {
 				this.tui.requestRender();
 				return;
 			}
-			this.onNewSession();
+			this.onNewSession(this.activeTab);
 			return;
 		}
 
@@ -1278,6 +1327,7 @@ class ShortcutBridgeWrapper implements EditorComponent, Focusable {
 
 export default function (pi: ExtensionAPI) {
 	let pendingSwitchPath: string | undefined;
+	let pendingSwitchIsNewSession = false;
 	let debugKeysUntil = 0;
 	const state = globalState();
 
@@ -1317,7 +1367,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (trimmedArgs === INTERNAL_COMMAND_SWITCH_ARG) {
 				const sessionPath = pendingSwitchPath;
+				const isNewSession = pendingSwitchIsNewSession;
 				pendingSwitchPath = undefined;
+				pendingSwitchIsNewSession = false;
 
 				if (!sessionPath) {
 					ctx.ui.notify("No session selected", "error");
@@ -1327,7 +1379,10 @@ export default function (pi: ExtensionAPI) {
 				await ctx.waitForIdle();
 				const result = await ctx.switchSession(sessionPath, {
 					withSession: async (nextCtx) => {
-						nextCtx.ui.notify("Switched session", "info");
+						nextCtx.ui.notify(
+							isNewSession ? `New session in ${nextCtx.cwd}` : "Switched session",
+							"info",
+						);
 					},
 				});
 
@@ -1362,6 +1417,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		// Remember the project working directory whenever we are in a normal
+		// (non-automation) session. Automation contexts — run sessions and sessions
+		// created inside the automation workspace (e.g. via the Automation tab's
+		// "New session") — must NOT overwrite it, so the Project tab and its "New
+		// session" always lead back to the original project directory.
+		if (!isAutomationContext(ctx)) {
+			state.projectCwd = ctx.cwd;
+		}
+
 		if (!ctx.hasUI) return;
 
 		state.cleanup?.();
@@ -1391,7 +1455,7 @@ export default function (pi: ExtensionAPI) {
 							theme,
 							ctx,
 							(path) => done({ type: "switch", path }),
-							() => done({ type: "new" }),
+							(tab) => done({ type: "new", tab }),
 							() => done(undefined),
 						);
 					},
@@ -1415,12 +1479,38 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("Editor not available", "error");
 					return;
 				}
-				// Start a brand-new session — same effect as typing /new.
+				// Start a brand-new session in the directory the active tab
+				// represents: Project tab -> project cwd, Automation Runs tab -> the
+				// automation workspace. This keeps automation-side new sessions out
+				// of the project's session list (and vice versa). Plain /new is only
+				// safe when the runtime already lives in the target directory with
+				// its default session dir (i.e. not inside an automation run session,
+				// whose sessionDir is the run's private sessions/run folder).
 				if (result.type === "new") {
-					submitText("/new");
+					const targetCwd = result.tab === "automation" ? AUTOMATION_WORKSPACE_ROOT : resolveProjectCwd(ctx);
+					if (ctx.cwd === targetCwd && ctx.sessionManager.usesDefaultSessionDir()) {
+						submitText("/new");
+						return;
+					}
+					try {
+						const sessionManager = SessionManager.create(targetCwd);
+						const newSessionPath = sessionManager.getSessionFile();
+						if (!newSessionPath) throw new Error("Failed to allocate a session file");
+						// Persist the header-only session eagerly so switchSession() can
+						// open it. _rewriteFile is private in the typings but is the exact
+						// writer SessionManager uses for its own header/entries.
+						(sessionManager as unknown as { _rewriteFile: () => void })._rewriteFile();
+						pendingSwitchPath = newSessionPath;
+						pendingSwitchIsNewSession = true;
+						submitText(`/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						ctx.ui.notify(`Failed to create session in ${targetCwd}: ${message}`, "error");
+					}
 					return;
 				}
 				pendingSwitchPath = result.path;
+				pendingSwitchIsNewSession = false;
 				submitText(`/${COMMAND_OPEN} ${INTERNAL_COMMAND_SWITCH_ARG}`);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
