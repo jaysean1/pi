@@ -1,11 +1,14 @@
 {
   "defaultModel": "gpt-5.6-sol",
   "defaultProvider": "openai-codex",
-  "defaultThinkingLevel": "max",
+  "defaultThinkingLevel": "high",
   "enabledModels": [
     "anthropic/claude-opus-4-8",
     "anthropic/claude-fable-5",
     "openai-codex/gpt-5.6-sol"
+  ],
+  "extensions": [
+    "-extensions/mermaid-ascii-view/index.ts"
   ],
   "lastChangelogVersion": "0.80.6",
   "packages": [
@@ -17,13 +20,13 @@
     "npm:@guwidoe/pi-prompt-suggester",
     "npm:@schultzp2020/pi-cursor",
     {
-      "source": "npm:pi-codex-image-gen",
       "extensions": [
         "-index.ts"
       ],
       "skills": [
         "-skills/imagegen/SKILL.md"
-      ]
+      ],
+      "source": "npm:pi-codex-image-gen"
     },
     {
       "extensions": [
@@ -43,12 +46,12 @@
     "npm:@ff-labs/pi-fff",
     {
       "extensions": [
-        "-extensions/chrome-profile-bridge/index.ts"
+        "+extensions/chrome-profile-bridge/index.ts"
       ],
       "source": "npm:pi-chrome"
     },
-    "/Users/jayseanqian/.vibe-island/pi-extension",
-    "extensions/pi_cron_manager"
+    "extensions/pi_cron_manager",
+    "/Users/jayseanqian/.vibe-island/pi-extension"
   ],
   "quietStartup": true,
   "terminal": {
@@ -60,8 +63,5 @@
   "treeFilterMode": "default",
   "warnings": {
     "anthropicExtraUsage": false
-  },
-  "extensions": [
-    "-extensions/mermaid-ascii-view/index.ts"
-  ]
+  }
 }
