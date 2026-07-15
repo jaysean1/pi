@@ -54,12 +54,14 @@ Codex automation import can be added later as an explicit migration workflow.
 │       └── stages/
 │           └── <stage-id>.md
 └── .pi-cron/                        # Runtime state; Git-ignored
-    ├── runs/<task-id>/<run-id>/
-    │   ├── run.json
-    │   ├── events.jsonl
-    │   ├── stdout.log
-    │   ├── stderr.log
-    │   └── final.md
+    ├── runs/<task-id>/
+    │   ├── memory.md                 # Bounded durable summaries from real runs
+    │   └── <run-id>/
+    │       ├── run.json
+    │       ├── events.jsonl
+    │       ├── stdout.log
+    │       ├── stderr.log
+    │       └── final.md
     ├── locks/<task-id>.lock
     ├── workflows/<task-id>.json       # One-time prompt-derived workflow cache
     └── tmp/
@@ -133,6 +135,11 @@ The package is installed from Pi's system extension directory. Its manifest expo
     "maxRuns": 50,
     "maxDays": 90
   },
+  "memory": {
+    "enabled": true,
+    "maxEntries": 120,
+    "maxSummaryChars": 2000
+  },
   "createdAt": "2026-07-11T00:00:00Z",
   "updatedAt": "2026-07-11T00:00:00Z"
 }
@@ -144,6 +151,10 @@ The package is installed from Pi's system extension directory. Its manifest expo
 - `cwd` must be an existing absolute directory.
 - Prompt files must resolve inside the task directory.
 - A task must contain at least one pipeline stage.
+- Optional stage `extensions` and `skills` must contain reviewed, absolute, existing file or directory paths that are not symlinks or world-writable.
+- Optional stage `pathEntries` must contain reviewed absolute directories; these are prepended only for that stage.
+- Optional `requireStatusMarker: true` makes a missing or failed Pi Cron completion marker fail the stage.
+- Optional task `memory` writes bounded summaries for cron and manual runs to `.pi-cron/runs/<task-id>/memory.md`; acceptance runs never update memory.
 - Model identifiers must resolve through `pi --list-models` before activation.
 - Cron expressions use standard five-field syntax only in version 1.
 - The configured timezone must be `Australia/Sydney` in this workspace.
@@ -189,6 +200,8 @@ pi
 --no-extensions
 --no-skills
 --no-prompt-templates
+[--extension <reviewed-absolute-path> ...]
+[--skill <reviewed-absolute-path> ...]
 --mode json
 -p
 --session-dir <run-directory>/sessions/<stage-id>
@@ -204,16 +217,19 @@ pi
 1. Load and validate `task.json`.
 2. Refuse disabled tasks unless `--force` is supplied for a manual run.
 3. Acquire an atomic per-task lock.
-4. Create the run directory and initial `run.json`.
+4. Create the run directory and initial `run.json`, then refresh `heartbeatAt` every 30 seconds while the run is active.
 5. Spawn `pi` with an argument array and `shell: false`.
-6. Disable extension, skill, and prompt-template discovery in the child Pi process. Scheduled runs therefore cannot trigger unrelated global hooks, hidden model calls, or extra tool metadata; task prompts must be self-contained and use built-in providers/tools.
-7. Stream Pi JSON events into `events.jsonl`.
-8. Capture standard output and standard error separately.
-9. Extract the last assistant text into `final.md`.
+6. Disable extension, skill, and prompt-template discovery in the child Pi process. Load only stage extensions and skills explicitly listed by reviewed absolute path, and prepend only reviewed stage PATH entries. Scheduled runs therefore cannot trigger unrelated global hooks, hidden model calls, or extra tool metadata.
+7. Stream Pi JSON events incrementally into `events.jsonl` and `stdout.log`, so evidence survives an abrupt parent-process exit.
+8. Capture standard error incrementally in `stderr.log`.
+9. Extract the last assistant text into `final.md`, removing runner-only completion markers.
 10. Record stage usage, model, duration, exit code, and error details.
-11. Enforce timeout and terminate the process safely.
-12. Apply run-retention rules after completion.
-13. Always release the task lock.
+11. When task memory is enabled, append a bounded real-run summary to `.pi-cron/runs/<task-id>/memory.md` and record the memory result in `run.json`.
+12. Enforce timeout and terminate the process safely.
+13. Fail a strict completion-contract stage when Pi emitted any errored tool result, even if the final assistant marker says succeeded.
+14. Reconcile a dead-PID lock to an `orphaned_process` failure before starting a replacement run; preserve locks owned by live PIDs.
+15. Apply run-retention rules after completion.
+16. Release only the lock still owned by the current run.
 
 ### Environment
 
@@ -319,7 +335,9 @@ Workflow helpers use a versioned module entry point (`src/workflow-v2.mjs`). Whe
 
 Shows provider, model ID, thinking level, tool allowlist, authentication availability, and model validation status. The model selector uses available Pi models rather than accepting an unchecked free-text value.
 
-The Runs view shows status, scheduled/manual trigger, start time, duration, model, token usage, estimated cost, final output preview, and saved-session availability. Runs are sorted by `startedAt` descending. Older records created before session persistence show `no saved session` and remain view-only.
+The Runs view shows status, scheduled/manual trigger, start time, duration, model, token usage, estimated cost, final output preview, and saved-session availability. Runs are sorted by `startedAt` descending. The dashboard validates the Pi session header before showing `session available` and validates it again before switching sessions. Missing or malformed sessions remain view-only, so a bad historical record cannot terminate the interactive Pi process.
+
+Each task also keeps bounded durable memory at `.pi-cron/runs/<task-id>/memory.md` when enabled. The skill CLI `get` command returns its path and latest excerpt. Acceptance runs are excluded so fake-runner checks do not pollute business memory. Fake acceptance runs do not publish resumable session files.
 
 Each run also preserves:
 
@@ -345,7 +363,7 @@ Logs are rendered with width-safe truncation and scrolling. Full files remain av
 - Mouse reporting is restored automatically when the overlay closes.
 - All colours use Pi theme tokens and have been verified with both `dark` and `light` themes.
 - All rendered lines use `truncateToWidth()` or `wrapTextWithAnsi()`.
-- `Shift+Command+J` opens Cron Manager directly from the prompt editor.
+- `Shift+Command+J` prepares `/cron` in the prompt editor; press Enter to open it with the command context required for session switching.
 - Kaku forwards `Shift+Command+J` as the private sequence `ESC[995~`; the extension handles both that sequence and Pi's standard Super+Shift+J key.
 
 ## 11. TUI Actions and Safety
@@ -355,7 +373,7 @@ Logs are rendered with width-safe truncation and scrolling. Full files remain av
 | New | Runs a guided form, writes draft files, validates, then asks whether to install the schedule. |
 | Edit | Edits the selected managed task only; shows manifest and crontab diffs. |
 | Run now | Shows model, cwd, tools, and side-effect warning before spawning the runner. |
-| Pause/resume | Updates `enabled`, previews the crontab diff, then confirms installation. |
+| Pause/resume | Shows one concise double check with the task name and requested action. Approval updates `enabled` and installs the internally validated managed crontab automatically; failures restore the prior task state. |
 | Delete | Removes only the managed schedule first; task files move to a local archive after a second confirmation. |
 | Refresh | Re-reads task files, crontab, model availability, active locks, and run records. |
 | Retry | Starts a new manual run; never mutates an old run record. |
@@ -385,6 +403,7 @@ Commands:
 - `list` — read-only task and validation summary.
 - `get <task-id>` — read-only task and recent-run details.
 - `run <task-id> --confirm-side-effects` — real execution after explicit approval.
+- `import-memory <task-id> <absolute-source-path> --confirm-memory-import` — one-time reviewed import into the Pi runtime memory path; refuses overwrite.
 - `sync-schedule` — read-only crontab preview with a current-content hash.
 - `sync-schedule --execute --confirm-schedule-change --expected-current-sha256 <hash>` — guarded, conflict-checked installation after review.
 - `set-status <task-id> <enabled|paused> --confirm-status-change` — task-definition mutation only; schedule synchronization remains a separate reviewed operation.
@@ -493,6 +512,8 @@ Writes use a temporary file followed by an atomic rename. A crashed run left in 
 
 - Never invoke task IDs, model IDs, or paths through an interpolated shell command.
 - Resolve prompt and stage files inside the task directory, including canonical-path checks that reject escaping symlinks.
+- Load stage extensions and skills only from explicit absolute paths after rejecting missing, symlinked, or world-writable entries.
+- Add stage PATH entries only from explicit absolute directories with the same safety checks.
 - Reject world-writable or symlinked task definitions.
 - Create runtime directories and temporary files with user-only permissions.
 - Redact common secret patterns from TUI previews and logs.

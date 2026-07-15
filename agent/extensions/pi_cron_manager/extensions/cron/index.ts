@@ -8,10 +8,11 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } f
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   displayPath,
+  inspectPiSessionFile,
   listRuns,
   listTasks,
   loadTask,
-  planCrontab,
+  planTaskEnabledChange,
   readUserCrontab,
   runTask,
   setTaskEnabled,
@@ -21,6 +22,7 @@ import {
 import { buildFallbackWorkflow, describeSchedule, loadWorkflow, parseWorkflowResponse, saveWorkflow, WORKFLOW_SYSTEM_PROMPT, workflowSourceHash } from "../../src/workflow-v2.mjs";
 import { enableMouseWheel, isMouseSequence, parseWheelEvents } from "../../src/mouse.mjs";
 import { firstRunsFocus, moveRunsFocus, SCHEDULE_TOGGLE_FOCUS } from "../../src/run-focus.mjs";
+import { buildRunSessionAction, getRunSessionStatus } from "../../src/run-session.mjs";
 
 type DashboardAction =
   | { type: "close" }
@@ -29,7 +31,8 @@ type DashboardAction =
   | { type: "run"; id: string }
   | { type: "toggle"; id: string }
   | { type: "edit-prompt"; id: string }
-  | { type: "resume-run"; id: string; runId: string; sessionFile: string };
+  | { type: "resume-run"; id: string; runId: string; sessionFile: string }
+  | { type: "session-unavailable"; id: string; runId: string; reason: string };
 
 type WorkflowStep = { title: string; detail?: string };
 type Workflow = {
@@ -267,8 +270,8 @@ class CronDashboard {
       this.done({ type: "toggle", id: view.id });
       return;
     }
-    const run = view.runs[this.selectedRun];
-    if (run?.sessionFile) this.done({ type: "resume-run", id: view.id, runId: run.runId, sessionFile: run.sessionFile });
+    const action = buildRunSessionAction(view.id, view.runs[this.selectedRun]);
+    if (action) this.done(action);
   }
 
   private switchTab(delta: number): void {
@@ -392,7 +395,12 @@ class CronDashboard {
       const selected = this.runsFocus && index === this.selectedRun;
       const prefix = selected ? th.fg("accent", "›") : " ";
       const status = run.status === "succeeded" ? th.fg("success", "✓") : run.status === "failed" ? th.fg("error", "✗") : th.fg("warning", "○");
-      const session = run.sessionFile ? th.fg("success", "session available") : th.fg("dim", "no saved session");
+      const sessionStatus = getRunSessionStatus(run);
+      const session = sessionStatus === "available"
+        ? th.fg("success", "session available")
+        : sessionStatus === "invalid"
+          ? th.fg("warning", "invalid saved session")
+          : th.fg("dim", "no saved session");
       const title = `${prefix} ${status} ${run.startedAt ?? run.runId}`;
       return [
         selected ? th.bg("selectedBg", title) : title,
@@ -556,7 +564,7 @@ function prioritiseView(views: TaskView[], id?: string): TaskView[] {
   return ordered;
 }
 
-async function initialiseTaskWorkflow(view: TaskView, ctx: ExtensionContext | ExtensionCommandContext): Promise<Workflow> {
+async function initialiseTaskWorkflow(view: TaskView, ctx: ExtensionContext): Promise<Workflow> {
   const existing = workflowInitialisations.get(view.id);
   if (existing) return existing;
   const initialisation = (async () => {
@@ -616,7 +624,7 @@ async function initialiseTaskWorkflow(view: TaskView, ctx: ExtensionContext | Ex
   }
 }
 
-async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, initialId?: string): Promise<void> {
+async function openDashboard(ctx: ExtensionCommandContext, initialId?: string): Promise<void> {
   let requestedId = initialId;
   while (true) {
     const selectedId = requestedId;
@@ -657,16 +665,15 @@ async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, in
       ctx.ui.setEditorText("/skill:create-cron-job Create a new scheduled Pi task");
       return;
     }
+    if (action.type === "session-unavailable") {
+      ctx.ui.notify(`Cannot resume cron run ${action.runId}: ${action.reason}`, "warning");
+      requestedId = action.id;
+      continue;
+    }
     if (action.type === "resume-run") {
-      try {
-        await readFile(action.sessionFile, "utf8");
-      } catch {
-        ctx.ui.notify(`Saved session is unavailable: ${action.sessionFile}`, "error");
-        requestedId = action.id;
-        continue;
-      }
-      if (!("switchSession" in ctx)) {
-        ctx.ui.notify("Open Automation Runs in the session switcher to resume this run, or open /cron as a command.", "warning");
+      const session = await inspectPiSessionFile(action.sessionFile);
+      if (session.status !== "available") {
+        ctx.ui.notify(`Cannot resume cron run ${action.runId}: ${session.error}`, "warning");
         requestedId = action.id;
         continue;
       }
@@ -695,13 +702,32 @@ async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, in
     if (action.type === "toggle") {
       const loaded = await loadTask(action.id);
       const nextEnabled = !loaded.task.enabled;
-      const ok = await ctx.ui.confirm(nextEnabled ? "Enable task?" : "Pause task?", `${loaded.task.name}\n\nThe managed user crontab will be updated after a preview.`);
+      const plan = await planTaskEnabledChange(action.id, nextEnabled);
+      const confirmation = `${loaded.task.name}\n\n${nextEnabled ? "Enable" : "Pause"} this task and apply the schedule change now?`;
+      const ok = await ctx.ui.confirm("Double check", confirmation);
       if (!ok) { requestedId = action.id; continue; }
-      await setTaskEnabled(action.id, nextEnabled);
-      const plan = await planCrontab();
-      const install = await ctx.ui.confirm("Install crontab change?", plan.changed ? plan.next : "No crontab change is required.");
-      if (install && plan.changed) await syncCrontab({ execute: true, expectedCurrent: plan.current });
-      else if (!install) await setTaskEnabled(action.id, !nextEnabled);
+      let definitionChanged = false;
+      let crontabUpdated = false;
+      try {
+        await setTaskEnabled(action.id, nextEnabled);
+        definitionChanged = true;
+        const syncResult = await syncCrontab({ execute: true, expectedCurrent: plan.current, expectedNext: plan.next });
+        crontabUpdated = syncResult.executed;
+      } catch (error) {
+        let rollbackError = "";
+        if (definitionChanged) {
+          try {
+            await setTaskEnabled(action.id, !nextEnabled);
+          } catch (rollback) {
+            rollbackError = ` Task-definition rollback also failed: ${rollback instanceof Error ? rollback.message : String(rollback)}`;
+          }
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Unable to apply schedule change: ${message}.${rollbackError}`, "error");
+        requestedId = action.id;
+        continue;
+      }
+      ctx.ui.notify(`${loaded.task.name} is now ${nextEnabled ? "enabled" : "paused"}; the managed crontab is ${crontabUpdated ? "updated" : "already current"}.`, "info");
       requestedId = action.id;
       continue;
     }
@@ -719,7 +745,7 @@ async function openDashboard(ctx: ExtensionContext | ExtensionCommandContext, in
 }
 
 export default function cronExtension(pi: ExtensionAPI) {
-  const openFromShortcut = async (ctx: ExtensionContext) => {
+  const openFromShortcut = (ctx: ExtensionContext) => {
     const now = Date.now();
     if (now - lastShortcutAt < 200) return;
     lastShortcutAt = now;
@@ -731,12 +757,18 @@ export default function cronExtension(pi: ExtensionAPI) {
       ctx.ui.notify("Wait until Pi is idle before opening Cron Manager.", "warning");
       return;
     }
-    await openDashboard(ctx);
+    const editorText = ctx.ui.getEditorText().trim();
+    if (editorText && editorText !== "/cron") {
+      ctx.ui.notify("The editor has unsent text. Run /cron manually to preserve it.", "warning");
+      return;
+    }
+    ctx.ui.setEditorText("/cron");
+    ctx.ui.notify("Press Enter to open Cron Manager.", "info");
   };
 
   pi.registerShortcut(CRON_SHORTCUT, {
-    description: "Open Pi Cron Manager",
-    handler: async (ctx) => openFromShortcut(ctx),
+    description: "Prepare Pi Cron Manager command",
+    handler: (ctx) => openFromShortcut(ctx),
   });
 
   pi.on("session_shutdown", () => {
@@ -750,7 +782,7 @@ export default function cronExtension(pi: ExtensionAPI) {
     shortcutCleanup?.();
     shortcutCleanup = ctx.ui.onTerminalInput((data) => {
       if (!isCronShortcut(data)) return undefined;
-      void openFromShortcut(ctx);
+      openFromShortcut(ctx);
       return { consume: true };
     });
   });

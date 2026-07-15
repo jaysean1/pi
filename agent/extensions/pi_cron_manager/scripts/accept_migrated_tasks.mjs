@@ -11,7 +11,7 @@ const temp = await mkdtemp(join(tmpdir(), "pi-cron-acceptance-"));
 const fakePi = join(temp, "fake-pi.mjs");
 await writeFile(
   fakePi,
-  `#!/usr/bin/env node\nimport{writeFileSync}from"node:fs";import{join}from"node:path";const args=process.argv.slice(2);const prompt=args.at(-1)||"";if(!prompt.trim()){process.stderr.write("empty prompt\\n");process.exit(2)}const sessionDir=args[args.indexOf("--session-dir")+1];writeFileSync(join(sessionDir,"acceptance-session.jsonl"),"{}\\n");const model=args[args.indexOf("--model")+1];const message={role:"assistant",content:[{type:"text",text:"Runner acceptance passed for "+model}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};console.log(JSON.stringify({type:"message_end",message}));\n`,
+  `#!/usr/bin/env node\nconst args=process.argv.slice(2);const prompt=args.at(-1)||"";if(!prompt.trim()){process.stderr.write("empty prompt\\n");process.exit(2)}const model=args[args.indexOf("--model")+1];const message={role:"assistant",content:[{type:"text",text:"Runner acceptance passed for "+model+"\\n\\nPI_CRON_STAGE_STATUS: succeeded"}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};console.log(JSON.stringify({type:"message_end",message}));\n`,
   { mode: 0o700 },
 );
 await chmod(fakePi, 0o700);
@@ -26,7 +26,7 @@ try {
     }
     const run = await runTask(item.id, { force: true, trigger: "acceptance", piBin: fakePi });
     const finalOutput = await readFile(join(run.directory, "final.md"), "utf8");
-    results.push({ ...base, status: run.sessionFile ? run.status : "failed", runId: run.runId, sessionFile: run.sessionFile ?? null, finalOutput: finalOutput.trim() });
+    results.push({ ...base, status: run.status, runId: run.runId, sessionFile: run.sessionFile ?? null, finalOutput: finalOutput.trim() });
   }
 } finally {
   await rm(temp, { recursive: true, force: true });

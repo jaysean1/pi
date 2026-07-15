@@ -4,10 +4,12 @@
 
 import { createHash } from "node:crypto";
 import {
+  importTaskMemory,
   listRuns,
   listTasks,
   loadTask,
   planCrontab,
+  readTaskMemory,
   runTask,
   setTaskEnabled,
   syncCrontab,
@@ -21,6 +23,7 @@ Usage:
   pi-cron-cli.mjs run <task-id> --confirm-side-effects
   pi-cron-cli.mjs sync-schedule
   pi-cron-cli.mjs sync-schedule --execute --confirm-schedule-change --expected-current-sha256 <sha256>
+  pi-cron-cli.mjs import-memory <task-id> <absolute-source-path> --confirm-memory-import
   pi-cron-cli.mjs set-status <task-id> <enabled|paused> --confirm-status-change
 
 Use cases:
@@ -29,6 +32,7 @@ Use cases:
   run            Execute the real task prompt; may cause external side effects.
   sync-schedule  Preview the managed crontab by default; installation requires an
                  explicit confirmation flag and the hash returned by the preview.
+  import-memory  Copy one reviewed legacy memory file into the Pi runtime path.
   set-status     Change only task.json. Run sync-schedule separately to preview and
                  approve the resulting crontab change.
 
@@ -105,8 +109,11 @@ async function main() {
     requireExactShape(positionals, 1, "pi-cron-cli.mjs get <task-id>");
     rejectUnknownFlags(flags, new Set());
     const loaded = await loadTask(positionals[0]);
-    const runs = await listRuns(positionals[0], 10);
-    print({ task: loaded.task, validation: loaded.validation, runs });
+    const [runs, memory] = await Promise.all([
+      listRuns(positionals[0], 10),
+      readTaskMemory(positionals[0]),
+    ]);
+    print({ task: loaded.task, validation: loaded.validation, memory, runs });
     return;
   }
 
@@ -142,6 +149,16 @@ async function main() {
     }
     const result = await syncCrontab({ execute: true, expectedCurrent: plan.current });
     print({ ...result, currentSha256 });
+    return;
+  }
+
+  if (command === "import-memory") {
+    requireExactShape(positionals, 2, "pi-cron-cli.mjs import-memory <task-id> <absolute-source-path> --confirm-memory-import");
+    rejectUnknownFlags(flags, new Set(["--confirm-memory-import"]));
+    if (!flags.has("--confirm-memory-import")) {
+      throw new Error("Refusing task memory import without --confirm-memory-import");
+    }
+    print(await importTaskMemory(positionals[0], positionals[1]));
     return;
   }
 

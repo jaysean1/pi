@@ -9,6 +9,9 @@ Complete this checklist before enabling or running a task.
 - [ ] Working directory exists.
 - [ ] Model is available in Pi.
 - [ ] Tools are limited to what the task needs.
+- [ ] Every explicit stage extension, skill, and PATH entry has been reviewed.
+- [ ] Side-effecting stages fail closed with a reviewed completion contract.
+- [ ] Task memory uses the Git-ignored Pi runtime path and has bounded retention.
 - [ ] No secret value is stored in task files.
 
 ## Schedule
