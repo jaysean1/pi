@@ -4,6 +4,11 @@ import path from "node:path";
 
 const CODEX_TAIL_BYTES = 512 * 1024;
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+// Undocumented ChatGPT backend endpoint the Codex app itself uses. Returns the
+// live weekly window, so it stays correct even when usage is spent via other
+// clients (e.g. Pi) that never write a ~/.codex rollout rate_limits block.
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_SEVEN_DAY_SECONDS = 7 * 24 * 60 * 60;
 
 export interface UsageWindow {
 	/** Used percentage, 0-100. */
@@ -15,6 +20,10 @@ export interface UsageWindow {
 export interface Usage {
 	fiveHour?: UsageWindow;
 	sevenDay?: UsageWindow;
+	/** Model-scoped weekly window (e.g. "Fable") from a weekly_scoped limit. */
+	weeklyScoped?: UsageWindow;
+	/** Display name of the scoped model, lower-cased for the statusline label. */
+	weeklyScopedLabel?: string;
 	stale?: boolean;
 	source?: string;
 	updatedMs?: number;
@@ -109,6 +118,120 @@ function toCodexWindow(raw: unknown): UsageWindow | undefined {
 	return { pct: r.used_percent, resetMs: resetSec * 1000 };
 }
 
+function codexWindowMinutes(raw: unknown): number | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const minutes = (raw as { window_minutes?: unknown }).window_minutes;
+	return typeof minutes === "number" && Number.isFinite(minutes) ? minutes : undefined;
+}
+
+export function parseCodexRateLimits(raw: unknown): Usage | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const rateLimits = raw as { primary?: unknown; secondary?: unknown };
+	const primary = toCodexWindow(rateLimits.primary);
+	const secondary = toCodexWindow(rateLimits.secondary);
+
+	// Codex now exposes only a weekly window. It can occupy the primary slot,
+	// while older rollouts stored it in secondary, so identify it by duration.
+	const sevenDay =
+		(codexWindowMinutes(rateLimits.primary) === 7 * 24 * 60 ? primary : undefined) ??
+		(codexWindowMinutes(rateLimits.secondary) === 7 * 24 * 60 ? secondary : undefined) ??
+		secondary ??
+		primary;
+
+	return sevenDay ? { sevenDay } : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Codex: query the live ChatGPT backend usage endpoint (preferred source)
+// ---------------------------------------------------------------------------
+
+export interface CodexAuth {
+	token: string;
+	accountId: string;
+}
+
+export function readCodexAuth(
+	filePath = path.join(os.homedir(), ".codex", "auth.json"),
+): CodexAuth | undefined {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (!raw || typeof raw !== "object") return undefined;
+	const tokens = (raw as { tokens?: unknown }).tokens;
+	if (!tokens || typeof tokens !== "object") return undefined;
+	const t = tokens as { access_token?: unknown; account_id?: unknown };
+	const token = typeof t.access_token === "string" ? t.access_token : "";
+	const accountId = typeof t.account_id === "string" ? t.account_id : "";
+	return token ? { token, accountId } : undefined;
+}
+
+function toCodexUsageWindow(raw: unknown): UsageWindow | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const r = raw as { used_percent?: unknown; reset_at?: unknown };
+	if (typeof r.used_percent !== "number") return undefined;
+	const resetSec = typeof r.reset_at === "number" ? r.reset_at : NaN;
+	return { pct: r.used_percent, resetMs: resetSec * 1000 };
+}
+
+function codexUsageWindowSeconds(raw: unknown): number | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const s = (raw as { limit_window_seconds?: unknown }).limit_window_seconds;
+	return typeof s === "number" && Number.isFinite(s) ? s : undefined;
+}
+
+export function parseCodexUsageResponse(data: unknown, nowMs = Date.now()): Usage | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const rateLimit = (data as { rate_limit?: unknown }).rate_limit;
+	if (!rateLimit || typeof rateLimit !== "object") return undefined;
+	const rl = rateLimit as { primary_window?: unknown; secondary_window?: unknown };
+	const primary = toCodexUsageWindow(rl.primary_window);
+	const secondary = toCodexUsageWindow(rl.secondary_window);
+
+	// Prefer whichever window is the weekly one; fall back to primary/secondary.
+	const sevenDay =
+		(codexUsageWindowSeconds(rl.primary_window) === CODEX_SEVEN_DAY_SECONDS ? primary : undefined) ??
+		(codexUsageWindowSeconds(rl.secondary_window) === CODEX_SEVEN_DAY_SECONDS ? secondary : undefined) ??
+		primary ??
+		secondary;
+
+	return sevenDay ? { sevenDay, source: "oauth", stale: false, updatedMs: nowMs } : undefined;
+}
+
+export async function fetchCodexUsageWithToken(token: string, accountId: string): Promise<FetchResult> {
+	if (!token) return { failure: "unauthorised" };
+
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 10_000);
+	try {
+		const res = await fetch(CODEX_USAGE_URL, {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+				"User-Agent": "codex-cli",
+				Accept: "application/json",
+			},
+			signal: controller.signal,
+		});
+		if (res.status === 429) return { failure: "rate-limited", rateLimited: true };
+		if (res.status === 401 || res.status === 403) return { failure: "unauthorised" };
+		if (!res.ok) return { failure: "http" };
+		const data = await res.json();
+		const usage = parseCodexUsageResponse(data);
+		return usage ? { usage } : { failure: "invalid-response" };
+	} catch {
+		return { failure: "network" };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Codex: read the last rate_limits block from the newest rollout (fallback)
+// ---------------------------------------------------------------------------
+
 export function readCodexUsage(): Usage | undefined {
 	const file = latestCodexRollout();
 	if (!file) return undefined;
@@ -124,17 +247,14 @@ export function readCodexUsage(): Usage | undefined {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i]!.trim();
 		if (!line || !line.includes("rate_limits")) continue;
-		let entry: { payload?: { rate_limits?: { primary?: unknown; secondary?: unknown } } };
+		let entry: { payload?: { rate_limits?: unknown } };
 		try {
 			entry = JSON.parse(line);
 		} catch {
 			continue;
 		}
-		const rl = entry.payload?.rate_limits;
-		if (!rl) continue;
-		const fiveHour = toCodexWindow(rl.primary);
-		if (!fiveHour) continue;
-		return { fiveHour, sevenDay: toCodexWindow(rl.secondary) };
+		const usage = parseCodexRateLimits(entry.payload?.rate_limits);
+		if (usage) return usage;
 	}
 	return undefined;
 }
@@ -204,6 +324,16 @@ function limitWindow(data: unknown, match: (limit: Record<string, unknown>) => b
 	return toClaudeWindow(findLimit(data, match));
 }
 
+function scopedModelName(limit: Record<string, unknown> | undefined): string | undefined {
+	if (!limit) return undefined;
+	const scope = limit.scope;
+	if (!scope || typeof scope !== "object") return undefined;
+	const model = (scope as { model?: unknown }).model;
+	if (!model || typeof model !== "object") return undefined;
+	const name = (model as { display_name?: unknown }).display_name;
+	return typeof name === "string" && name.trim() ? name.trim().toLowerCase() : undefined;
+}
+
 function firstKnownResetMs(...windows: Array<UsageWindow | undefined>): number {
 	for (const window of windows) {
 		if (window && Number.isFinite(window.resetMs)) return window.resetMs;
@@ -225,6 +355,7 @@ export function parseClaudeUsageResponse(data: unknown, nowMs = Date.now()): Usa
 			(limit.group === "weekly" && (limit.scope === null || limit.scope === undefined)),
 	);
 	const anyWeeklyLimit = limitWindow(data, (limit) => limit.group === "weekly");
+	const scopedLimit = findLimit(data, (limit) => limit.kind === "weekly_scoped");
 
 	const raw = data as { five_hour?: unknown; seven_day?: unknown };
 	const fiveHour = toClaudeWindow(raw.five_hour, sessionLimit?.resetMs) ?? sessionLimit;
@@ -232,9 +363,11 @@ export function parseClaudeUsageResponse(data: unknown, nowMs = Date.now()): Usa
 		toClaudeWindow(raw.seven_day, firstKnownResetMs(weeklyAllLimit, anyWeeklyLimit)) ??
 		weeklyAllLimit ??
 		anyWeeklyLimit;
+	const weeklyScoped = toClaudeWindow(scopedLimit);
+	const weeklyScopedLabel = scopedModelName(scopedLimit);
 
-	if (!fiveHour && !sevenDay) return undefined;
-	return { fiveHour, sevenDay, source: "oauth", stale: false, updatedMs: nowMs };
+	if (!fiveHour && !sevenDay && !weeklyScoped) return undefined;
+	return { fiveHour, sevenDay, weeklyScoped, weeklyScopedLabel, source: "oauth", stale: false, updatedMs: nowMs };
 }
 
 export async function fetchClaudeUsageWithToken(token: string): Promise<FetchResult> {
@@ -289,10 +422,19 @@ export function readClaudeUsageCache(
 	}
 	if (!raw || typeof raw !== "object") return undefined;
 
-	const cached = raw as { fiveHour?: unknown; sevenDay?: unknown; updatedMs?: unknown };
+	const cached = raw as {
+		fiveHour?: unknown;
+		sevenDay?: unknown;
+		weeklyScoped?: unknown;
+		weeklyScopedLabel?: unknown;
+		updatedMs?: unknown;
+	};
 	const fiveHour = cachedWindow(cached.fiveHour);
 	const sevenDay = cachedWindow(cached.sevenDay);
-	if (!fiveHour && !sevenDay) return undefined;
+	const weeklyScoped = cachedWindow(cached.weeklyScoped);
+	const weeklyScopedLabel =
+		typeof cached.weeklyScopedLabel === "string" ? cached.weeklyScopedLabel : undefined;
+	if (!fiveHour && !sevenDay && !weeklyScoped) return undefined;
 
 	const updatedMs = typeof cached.updatedMs === "number" && Number.isFinite(cached.updatedMs)
 		? cached.updatedMs
@@ -300,6 +442,8 @@ export function readClaudeUsageCache(
 	return {
 		fiveHour,
 		sevenDay,
+		weeklyScoped,
+		weeklyScopedLabel,
 		source: "cache",
 		stale: !Number.isFinite(updatedMs) || nowMs - updatedMs > staleAfterMs,
 		updatedMs,
@@ -307,12 +451,14 @@ export function readClaudeUsageCache(
 }
 
 export function writeClaudeUsageCache(filePath: string, usage: Usage): boolean {
-	if (!usage.fiveHour && !usage.sevenDay) return false;
+	if (!usage.fiveHour && !usage.sevenDay && !usage.weeklyScoped) return false;
 	const updatedMs = Number.isFinite(usage.updatedMs) ? usage.updatedMs : Date.now();
 	const payload = JSON.stringify({
 		version: 1,
 		fiveHour: usage.fiveHour,
 		sevenDay: usage.sevenDay,
+		weeklyScoped: usage.weeklyScoped,
+		weeklyScopedLabel: usage.weeklyScopedLabel,
 		updatedMs,
 	});
 	const directory = path.dirname(filePath);
