@@ -122,24 +122,9 @@ export default function englishLearningExtension(pi: ExtensionAPI) {
 		state.cleanup?.();
 		state.cleanup = undefined;
 
-		const editorAdapter: EditorComponent = {
-			getText: () => ctx.ui.getEditorText(),
-			getExpandedText: () => ctx.ui.getEditorText(),
-			setText: (text: string) => ctx.ui.setEditorText(text),
-			insertTextAtCursor: (text: string) => ctx.ui.pasteToEditor(text),
-			handleInput: () => {},
-			render: () => [],
-			invalidate: () => {},
-		};
-
-		const getOptimizationEditor = (): EditorComponent => {
-			if (activeEditor?.focused) return activeEditor;
-			return editorAdapter;
-		};
-
 		const maybeOptimizeInput = (): boolean => {
-			if (isTranslationOverlayOpen()) return false;
-			const editor = getOptimizationEditor();
+			if (isTranslationOverlayOpen() || !activeEditor?.focused) return false;
+			const editor = activeEditor;
 			if (isAutocompleteOpen(editor)) return false;
 			const text = editor.getExpandedText?.() ?? editor.getText();
 			if (!text.trim() || shouldSkipInputRewrite(text)) return false;
