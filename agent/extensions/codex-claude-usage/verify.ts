@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import {
 	fetchClaudeUsageWithToken,
+	fetchCodexUsageWithToken,
 	formatReset,
 	latestCodexRollout,
 	parseClaudeUsageResponse,
+	readCodexAuth,
 	readCodexUsage,
 } from "./usage-core.ts";
 
@@ -21,14 +23,26 @@ function describeUsage(
 	if (!usage) return "(no data)";
 	const source = usage.source ? ` source=${usage.source}` : "";
 	const stale = usage.stale ? " stale=true" : "";
-	return `5h: ${pct(usage.fiveHour?.pct)} (${formatReset(usage.fiveHour?.resetMs ?? NaN)}) | 7d: ${pct(usage.sevenDay?.pct)} (${formatReset(usage.sevenDay?.resetMs ?? NaN)})${source}${stale}`;
+	const windows: string[] = [];
+	if (usage.fiveHour) windows.push(`5h: ${pct(usage.fiveHour.pct)} (${formatReset(usage.fiveHour.resetMs)})`);
+	if (usage.sevenDay) windows.push(`7d: ${pct(usage.sevenDay.pct)} (${formatReset(usage.sevenDay.resetMs)})`);
+	return `${windows.join(" | ")}${source}${stale}`;
 }
 
 const rollout = latestCodexRollout();
 console.log("codex rollout file:", rollout ?? "(none found)");
 
 const codex = readCodexUsage();
-console.log("codex usage:", describeUsage(codex));
+console.log("codex usage (rollout fallback):", describeUsage(codex));
+
+const codexAuth = readCodexAuth();
+const codexLive = codexAuth
+	? await fetchCodexUsageWithToken(codexAuth.token, codexAuth.accountId)
+	: {};
+console.log(
+	"codex usage (live endpoint):",
+	codexLive.rateLimited ? "(rate limited / 429)" : describeUsage(codexLive.usage),
+);
 
 const sampleMissingFiveHourReset = parseClaudeUsageResponse({
 	five_hour: { utilization: 0 },
