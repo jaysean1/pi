@@ -3,13 +3,13 @@
   "private": true,
   "dependencies": {
     "@diegopetrucci/pi-openai-fast": "^0.1.6",
-    "@ff-labs/pi-fff": "^0.9.6",
+    "@ff-labs/pi-fff": "^0.10.0",
     "@guwidoe/pi-prompt-suggester": "^0.3.10",
     "@juicesharp/rpiv-ask-user-question": "^1.20.0",
     "@schultzp2020/pi-cursor": "^0.5.0",
     "@tintinweb/pi-subagents": "^0.13.0",
     "pi-chrome": "^0.15.46",
-    "pi-codex-image-gen": "^0.1.11",
+    "pi-codex-image-gen": "^0.1.12",
     "pi-mono-figma": "^0.2.2",
     "pi-web-access": "^0.13.0"
   }

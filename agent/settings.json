@@ -1,6 +1,6 @@
 {
-  "defaultModel": "gpt-5.6-sol",
-  "defaultProvider": "openai-codex",
+  "defaultModel": "claude-opus-4-8",
+  "defaultProvider": "anthropic",
   "defaultThinkingLevel": "high",
   "enabledModels": [
     "anthropic/claude-opus-4-8",
@@ -10,7 +10,7 @@
   "extensions": [
     "-extensions/mermaid-ascii-view/index.ts"
   ],
-  "lastChangelogVersion": "0.80.6",
+  "lastChangelogVersion": "0.80.10",
   "packages": [
     {
       "skills": [],
@@ -21,16 +21,16 @@
     "npm:@schultzp2020/pi-cursor",
     {
       "extensions": [
-        "-index.ts"
+        "+index.ts"
       ],
       "skills": [
-        "-skills/imagegen/SKILL.md"
+        "+skills/imagegen/SKILL.md"
       ],
       "source": "npm:pi-codex-image-gen"
     },
     {
       "extensions": [
-        "-dist/index.js"
+        "+dist/index.js"
       ],
       "source": "/Users/jayseanqian/.vibe-island/pi-extension"
     },
