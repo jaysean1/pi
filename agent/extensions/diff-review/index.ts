@@ -10,7 +10,11 @@ import {
 	TOGGLE_KEY,
 	TRACKED_TOOLS,
 } from "./src/core/constants.ts";
-import type { ChangeEntry, ReviewOpenMode } from "./src/core/types.ts";
+import type {
+	ChangeEntry,
+	ReviewOpenMode,
+	ReviewOverlayState,
+} from "./src/core/types.ts";
 import { buildFileDiffs } from "./src/core/diff-engine.ts";
 import {
 	clearPersistedChanges,
@@ -37,6 +41,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	let persistWarningShown = false;
 	let activeWidget: DiffReviewWidget | undefined;
 	let activeEditor: (EditorComponent & Partial<Focusable>) | undefined;
+	let reviewViewState: ReviewOverlayState | undefined;
 	// Session-cumulative change set, keyed by absolute path.
 	const changes = new Map<string, ChangeEntry>();
 
@@ -142,6 +147,10 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 			(action) => {
 				if (action === "clear") clearChanges(ctx);
 			},
+			reviewViewState,
+			(state) => {
+				reviewViewState = state;
+			},
 		);
 	};
 
@@ -241,6 +250,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		saveChanges(ctx);
+		reviewViewState = undefined;
 	});
 
 	// Keep the diff status line pinned directly above the input. The rpiv-todo
@@ -262,6 +272,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
 	// session-footer-switcher extension: a raw-input safety net plus an editor
 	// wrapper that catches the key while the editor has focus.
 	pi.on("session_start", (_event, ctx) => {
+		reviewViewState = undefined;
 		loadChanges(ctx);
 		if (!ctx.hasUI) return;
 

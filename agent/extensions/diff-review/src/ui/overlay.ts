@@ -1,7 +1,7 @@
 // Render and launch the full-screen diff-review overlay.
 // Not for session event registration.
 
-import { basename } from "node:path";
+import { basename, isAbsolute, relative, sep } from "node:path";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -33,6 +33,7 @@ import type {
 	Focus,
 	ReviewCloseAction,
 	ReviewOpenMode,
+	ReviewOverlayState,
 	UnifiedDiffLine,
 } from "../core/types.ts";
 import { isToggleKey } from "../platform/keys.ts";
@@ -78,9 +79,12 @@ class DiffBrowseOverlay {
 			absPath: string,
 			displayPath: string,
 		) => void,
+		restoredState?: ReviewOverlayState,
+		private readonly saveState?: (state: ReviewOverlayState) => void,
 	) {
 		this.activeTab = initialTab;
 		this.browseRoot = createBrowseRoot(cwd);
+		if (restoredState) this.restoreState(restoredState);
 		// Touchpad two-finger scrolling arrives as wheel reports once mouse
 		// reporting is on. dispose() restores the terminal; ui.custom calls it
 		// automatically when the overlay closes.
@@ -88,7 +92,108 @@ class DiffBrowseOverlay {
 	}
 
 	dispose(): void {
+		this.saveState?.(this.snapshotState());
 		this.disableMouse();
+	}
+
+	private diffPath(file: FileDiff): string {
+		return file.absPath ?? file.displayPath;
+	}
+
+	private isWithin(parentPath: string, childPath: string): boolean {
+		const rel = relative(parentPath, childPath);
+		return (
+			rel !== "" &&
+			rel !== ".." &&
+			!rel.startsWith(`..${sep}`) &&
+			!isAbsolute(rel)
+		);
+	}
+
+	private restoreState(state: ReviewOverlayState): void {
+		const selectedDiff = state.diff.selectedPath
+			? this.files.findIndex(
+					(file) => this.diffPath(file) === state.diff.selectedPath,
+				)
+			: -1;
+		this.selected = selectedDiff >= 0 ? selectedDiff : 0;
+		const body = this.bodyRows();
+		this.listScroll = clamp(
+			state.diff.listScroll,
+			0,
+			Math.max(0, this.files.length - body),
+		);
+		if (this.selected < this.listScroll) this.listScroll = this.selected;
+		else if (this.selected >= this.listScroll + body)
+			this.listScroll = this.selected - body + 1;
+		this.diffScroll = Math.max(0, state.diff.diffScroll);
+		const selectedFile = this.currentDiff();
+		this.diffFocus =
+			state.diff.focus === "diff" && selectedFile?.rows.length
+				? "diff"
+				: "list";
+
+		const expandedDirs = new Set(state.browse.expandedDirs);
+		const restoreDirectory = (node: BrowseNode): void => {
+			if (node.kind !== "directory") return;
+			node.expanded = node === this.browseRoot || expandedDirs.has(node.absPath);
+			const hasExpandedDescendant = state.browse.expandedDirs.some((path) =>
+				this.isWithin(node.absPath, path),
+			);
+			if (!node.expanded && !hasExpandedDescendant) return;
+			loadBrowseChildren(node);
+			for (const child of node.children) restoreDirectory(child);
+		};
+		restoreDirectory(this.browseRoot);
+
+		const nodes = flattenBrowseTree(this.browseRoot);
+		const selectedBrowse = state.browse.selectedPath
+			? nodes.findIndex((node) => node.absPath === state.browse.selectedPath)
+			: -1;
+		this.browseSelected = selectedBrowse >= 0 ? selectedBrowse : 0;
+		this.browseScroll = clamp(
+			state.browse.browseScroll,
+			0,
+			Math.max(0, nodes.length - body),
+		);
+		if (this.browseSelected < this.browseScroll)
+			this.browseScroll = this.browseSelected;
+		else if (this.browseSelected >= this.browseScroll + body)
+			this.browseScroll = this.browseSelected - body + 1;
+		this.previewScroll = Math.max(0, state.browse.previewScroll);
+		this.browseFocus =
+			state.browse.focus === "preview" &&
+			nodes[this.browseSelected]?.kind === "file"
+				? "preview"
+				: "tree";
+	}
+
+	private snapshotState(): ReviewOverlayState {
+		const expandedDirs: string[] = [];
+		const collectExpanded = (node: BrowseNode): void => {
+			if (node.kind === "directory" && node.expanded)
+				expandedDirs.push(node.absPath);
+			for (const child of node.children) collectExpanded(child);
+		};
+		collectExpanded(this.browseRoot);
+		const diff = this.currentDiff();
+		const browse = this.currentBrowse();
+		return {
+			activeTab: this.activeTab,
+			diff: {
+				selectedPath: diff ? this.diffPath(diff) : undefined,
+				focus: this.diffFocus,
+				listScroll: this.listScroll,
+				diffScroll: this.diffScroll,
+			},
+			browse: {
+				selectedPath: browse.absPath,
+				expandedDirs,
+				focus: this.browseFocus,
+				browseScroll: this.browseScroll,
+				previewScroll: this.previewScroll,
+			},
+		};
 	}
 
 	private currentDiff(): FileDiff | undefined {
@@ -739,6 +844,8 @@ export async function openOverlay(
 	openFile: (file: FileDiff) => void,
 	openBrowseFile: (absPath: string, displayPath: string) => void,
 	onClosed?: (action: ReviewCloseAction) => void,
+	restoredState?: ReviewOverlayState,
+	saveState?: (state: ReviewOverlayState) => void,
 ): Promise<void> {
 	if (overlayOpen) return;
 	if (!ctx.hasUI) {
@@ -753,9 +860,8 @@ export async function openOverlay(
 			? "browse"
 			: mode === "diff"
 				? "diff"
-				: files.length > 0
-					? "diff"
-					: "browse";
+				: restoredState?.activeTab ??
+					(files.length > 0 ? "diff" : "browse");
 	try {
 		closeAction = await ctx.ui.custom<ReviewCloseAction>(
 			(tui, theme, _keybindings, done) =>
@@ -768,6 +874,8 @@ export async function openOverlay(
 					(action) => done(action),
 					openFile,
 					openBrowseFile,
+					restoredState,
+					saveState,
 				),
 			{
 				overlay: true,

@@ -51,6 +51,23 @@ export type BrowseNodeKind = "directory" | "file";
 export type ReviewOpenMode = "auto" | "diff" | "browse";
 export type ReviewCloseAction = "dismiss" | "clear";
 
+export interface ReviewOverlayState {
+	activeTab: ActiveTab;
+	diff: {
+		selectedPath?: string;
+		focus: Focus;
+		listScroll: number;
+		diffScroll: number;
+	};
+	browse: {
+		selectedPath?: string;
+		expandedDirs: string[];
+		focus: BrowseFocus;
+		browseScroll: number;
+		previewScroll: number;
+	};
+}
+
 export interface BrowseNode {
 	absPath: string;
 	name: string;
