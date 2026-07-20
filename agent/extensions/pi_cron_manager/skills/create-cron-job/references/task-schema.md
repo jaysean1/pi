@@ -66,7 +66,8 @@ Each task lives under `cron_jobs/tasks/<task-id>/`.
 - A stage may include `"extensions": ["/absolute/reviewed/extension.js"]`; automatic extension discovery remains disabled.
 - A stage may include `"skills": ["/absolute/reviewed/SKILL.md"]`; automatic skill discovery remains disabled.
 - A stage may include `"pathEntries": ["/absolute/reviewed/bin"]`; entries are prepended only for that stage.
-- A stage may set `"requireStatusMarker": true` to fail closed unless the final response reports the Pi Cron completion marker.
+- A stage may set `"requireStatusMarker": true` to fail closed unless the final response reports the Pi Cron completion marker. The marker is artefact-driven: the stage succeeds when the agent verified every required final artefact, even if it recovered from earlier tool errors. Recovered tool errors are recorded as a stage `warning` with `toolErrorCount`.
+- A stage may additionally set `"failOnToolError": true` to restore strict behaviour: any failed tool call fails the stage even when the completion marker reports succeeded.
 - Task `memory.enabled` writes real-run summaries to `.pi-cron/runs/<task-id>/memory.md`; `maxEntries` is 1-1000 and `maxSummaryChars` is 200-10000.
 - Acceptance runs must not update task memory.
 - Explicit resource entries must be absolute, exist, and must not be symlinks or world-writable; PATH entries must be directories.

@@ -306,9 +306,10 @@ test("streams Pi stdout and heartbeats before the child exits", async () => {
   assert.equal(run.status, "succeeded");
 });
 
-test("fails a strict stage when Pi reports an errored tool result", async () => {
+test("fails a strict stage when failOnToolError is set and Pi reports an errored tool result", async () => {
   const task = await makeTask("tool-error-task");
   task.pipeline[0].requireStatusMarker = true;
+  task.pipeline[0].failOnToolError = true;
   await writeFile(join(root, "tasks", task.id, "task.json"), `${JSON.stringify(task, null, 2)}\n`);
   const fakePi = join(root, "tool-error-pi.mjs");
   await writeFile(fakePi, `#!/usr/bin/env node\nconst toolCallId="failed-command";console.log(JSON.stringify({type:"tool_execution_end",toolCallId,isError:true}));const failedTool={role:"toolResult",toolName:"bash",toolCallId,isError:true,content:[{type:"text",text:"Command exited with code 1"}]};console.log(JSON.stringify({type:"message_end",message:failedTool}));const message={role:"assistant",content:[{type:"text",text:"recovered\\n\\nPI_CRON_STAGE_STATUS: succeeded"}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};console.log(JSON.stringify({type:"message_end",message}));\n`);
@@ -319,6 +320,36 @@ test("fails a strict stage when Pi reports an errored tool result", async () => 
   assert.equal(run.status, "failed");
   assert.equal(run.stages[0].toolErrorCount, 1);
   assert.match(run.error, /1 failed tool call/);
+});
+
+test("trusts the completion contract when a stage recovers from a tool error by default", async () => {
+  const task = await makeTask("tool-error-recovered-task");
+  task.pipeline[0].requireStatusMarker = true;
+  await writeFile(join(root, "tasks", task.id, "task.json"), `${JSON.stringify(task, null, 2)}\n`);
+  const fakePi = join(root, "tool-error-recovered-pi.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node\nconst toolCallId="failed-command";console.log(JSON.stringify({type:"tool_execution_end",toolCallId,isError:true}));const failedTool={role:"toolResult",toolName:"bash",toolCallId,isError:true,content:[{type:"text",text:"Command exited with code 1"}]};console.log(JSON.stringify({type:"message_end",message:failedTool}));const message={role:"assistant",content:[{type:"text",text:"recovered\\n\\nPI_CRON_STAGE_STATUS: succeeded"}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};console.log(JSON.stringify({type:"message_end",message}));\n`);
+  await chmod(fakePi, 0o755);
+
+  const run = await core.runTask(task.id, { force: true, trigger: "acceptance", piBin: fakePi });
+
+  assert.equal(run.status, "succeeded");
+  assert.equal(run.stages[0].toolErrorCount, 1);
+  assert.match(run.stages[0].warning, /recovered from 1 failed tool call/);
+  assert.equal(run.error ?? null, null);
+});
+
+test("still fails a contract stage when the agent reports failed after a tool error", async () => {
+  const task = await makeTask("tool-error-contract-failed-task");
+  task.pipeline[0].requireStatusMarker = true;
+  await writeFile(join(root, "tasks", task.id, "task.json"), `${JSON.stringify(task, null, 2)}\n`);
+  const fakePi = join(root, "tool-error-contract-failed-pi.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node\nconst toolCallId="failed-command";console.log(JSON.stringify({type:"tool_execution_end",toolCallId,isError:true}));const message={role:"assistant",content:[{type:"text",text:"artefact missing\\n\\nPI_CRON_STAGE_STATUS: failed"}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,cost:{total:0}}};console.log(JSON.stringify({type:"message_end",message}));\n`);
+  await chmod(fakePi, 0o755);
+
+  const run = await core.runTask(task.id, { force: true, trigger: "acceptance", piBin: fakePi });
+
+  assert.equal(run.status, "failed");
+  assert.match(run.error, /completion contract/);
 });
 
 test("does not publish malformed JSONL output as a resumable session", async () => {

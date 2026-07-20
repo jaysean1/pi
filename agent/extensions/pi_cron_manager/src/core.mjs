@@ -196,6 +196,9 @@ export async function validateTask(task, directory = taskDirectory(task?.id ?? "
     if (stage.requireStatusMarker !== undefined && typeof stage.requireStatusMarker !== "boolean") {
       errors.push(`pipeline[${index}].requireStatusMarker must be boolean`);
     }
+    if (stage.failOnToolError !== undefined && typeof stage.failOnToolError !== "boolean") {
+      errors.push(`pipeline[${index}].failOnToolError must be boolean`);
+    }
   }
   if (!task.model?.provider || !task.model?.id) errors.push("model.provider and model.id are required");
   if (!THINKING_LEVELS.has(task.model?.thinking)) errors.push("model.thinking is invalid");
@@ -617,7 +620,7 @@ export async function runTask(taskId, options = {}) {
       let prompt = await readFile(promptPath, "utf8");
       if (previousOutput && stage.input !== "none") prompt += `\n\n## Previous stage output\n\n${previousOutput}`;
       if (stage.requireStatusMarker) {
-        prompt += "\n\n## Pi Cron completion contract\n\nEnd the final response with exactly one of these lines:\n- `PI_CRON_STAGE_STATUS: succeeded` only when every required action and validation succeeded.\n- `PI_CRON_STAGE_STATUS: failed` when any required action or validation failed.\nNever report succeeded after a partial result, skipped required action, command error, missing output, or failed readback.\n";
+        prompt += "\n\n## Pi Cron completion contract\n\nEnd the final response with exactly one of these lines:\n- `PI_CRON_STAGE_STATUS: succeeded` only when every required final artefact (file, document, message, or other output) exists and passed its validation or readback.\n- `PI_CRON_STAGE_STATUS: failed` when any required final artefact is missing, wrong, or unverified.\nA recovered command error does not force a failed status: if an earlier command failed but you retried, recovered, and verified every required final artefact, report succeeded and briefly list the recovered errors. Never report succeeded after a partial result, skipped required action, missing output, or failed readback.\n";
       }
       const sessionDirectory = join(runDirectory, "sessions", stage.id);
       await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
@@ -732,10 +735,13 @@ export async function runTask(taskId, options = {}) {
           : statusMatch[1] === "failed"
             ? "Stage reported failure through the Pi Cron completion contract"
             : "";
-      const toolError = stage.requireStatusMarker && result.toolErrorCount > 0
+      const toolError = stage.requireStatusMarker && stage.failOnToolError === true && result.toolErrorCount > 0
         ? `Stage executed ${result.toolErrorCount} failed tool call(s) despite its final status marker`
         : "";
       stageRecord.toolErrorCount = result.toolErrorCount;
+      stageRecord.warning = !toolError && result.toolErrorCount > 0
+        ? `Stage recovered from ${result.toolErrorCount} failed tool call(s); final status taken from the completion contract`
+        : null;
       const stageError = result.providerError || (result.code !== 0 ? result.stderr.trim() || `Stage ${stage.id} exited ${result.code}` : "") || toolError || contractError;
       stageRecord.status = stageError ? "failed" : "succeeded";
       stageRecord.error = stageError || null;
